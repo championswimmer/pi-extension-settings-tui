@@ -1,0 +1,614 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { after, describe, it } from "node:test";
+import { defineSettings, field } from "../dist/schema/index.js";
+import {
+  ConcurrencyConflictError,
+  MAX_SETTINGS_BYTES,
+  SettingsSecurityError,
+  assertNoSymlinkSegments,
+  computeJsonHash,
+  createJsonFileStorageAdapter,
+  createMemoryStorageAdapter,
+  createSessionStorageAdapter,
+  createSettingsStore,
+  deleteFileHardened,
+  ensureSecureDir,
+  readJsonFileHardened,
+  resolveDefaultAgentDir,
+  resolveScopeFilePath,
+  writeJsonFileHardened,
+} from "../dist/store/index.js";
+
+const tempDirs = [];
+
+function makeTempDir(prefix = "pi-settings-store-test-") {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+after(() => {
+  for (const dir of tempDirs) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function createSampleSchema(overrides = {}) {
+  return defineSettings({
+    id: overrides.id ?? "sample-ext",
+    title: "Sample Extension",
+    scopes: overrides.scopes ?? ["global", "project"],
+    storage: overrides.storage,
+    migrate: overrides.migrate,
+    fields: {
+      enabled: field.boolean({ label: "Enabled", default: true }),
+      mode: field.enum({
+        label: "Mode",
+        default: "balanced",
+        options: [
+          { value: "fast", label: "Fast" },
+          { value: "balanced", label: "Balanced" },
+          { value: "strict", label: "Strict" },
+        ],
+      }),
+      maxItems: field.integer({ label: "Max items", default: 10, min: 1, max: 100 }),
+      tags: field.multiSelect({
+        label: "Tags",
+        default: ["alpha"],
+        options: [
+          { value: "alpha", label: "Alpha" },
+          { value: "beta", label: "Beta" },
+          { value: "gamma", label: "Gamma" },
+        ],
+      }),
+      globalOnly: field.string({
+        label: "Global only",
+        default: "g-default",
+        scopes: ["global"],
+      }),
+      metadata: field.custom({
+        label: "Metadata",
+        default: { count: 0, nested: { label: "none" } },
+      }),
+    },
+  });
+}
+
+describe("store / path resolution & json adapter", () => {
+  it("resolves default agent dir with PI_CODING_AGENT_DIR and fallback", () => {
+    const prev = process.env.PI_CODING_AGENT_DIR;
+    try {
+      delete process.env.PI_CODING_AGENT_DIR;
+      assert.equal(resolveDefaultAgentDir(), path.join(os.homedir(), ".pi", "agent"));
+
+      process.env.PI_CODING_AGENT_DIR = "~/custom-pi-agent";
+      assert.equal(resolveDefaultAgentDir(), path.join(os.homedir(), "custom-pi-agent"));
+
+      const customAbs = path.join(os.tmpdir(), "pi-agent-override");
+      process.env.PI_CODING_AGENT_DIR = customAbs;
+      assert.equal(resolveDefaultAgentDir(), path.resolve(customAbs));
+    } finally {
+      if (prev === undefined) {
+        delete process.env.PI_CODING_AGENT_DIR;
+      } else {
+        process.env.PI_CODING_AGENT_DIR = prev;
+      }
+    }
+  });
+
+  it("supports default paths as well as custom fileName, globalPath, and projectPath (string & fn)", () => {
+    const root = makeTempDir();
+    const agentDir = path.join(root, "agent");
+    const cwd = path.join(root, "repo");
+
+    const defaultSchema = createSampleSchema({ id: "my-ext" });
+    assert.equal(
+      resolveScopeFilePath(defaultSchema, "global", { agentDir, cwd }),
+      path.join(agentDir, "my-ext", "settings.json"),
+    );
+    assert.equal(
+      resolveScopeFilePath(defaultSchema, "project", { agentDir, cwd }),
+      path.join(cwd, ".pi", "agent", "my-ext", "settings.json"),
+    );
+
+    // Custom fileName + resolver functions (matching pi-checklist / pi-context-decisions style)
+    const fnSchema = createSampleSchema({
+      id: "pi-checklist",
+      storage: {
+        fileName: "checklist.json",
+        globalPath: ({ agentDir: dir, fileName }) => path.join(dir, fileName),
+        projectPath: ({ cwd: projectCwd, fileName }) => path.join(projectCwd, ".pi", fileName),
+      },
+    });
+    assert.equal(
+      resolveScopeFilePath(fnSchema, "global", { agentDir, cwd }),
+      path.join(agentDir, "checklist.json"),
+    );
+    assert.equal(
+      resolveScopeFilePath(fnSchema, "project", { agentDir, cwd }),
+      path.join(cwd, ".pi", "checklist.json"),
+    );
+
+    // String paths (relative & absolute) overridden in options
+    const adapter = createJsonFileStorageAdapter(defaultSchema, {
+      agentDir,
+      cwd,
+      globalPath: "custom-global.json",
+      projectPath: path.join(cwd, ".pi", "custom-project.json"),
+    });
+    assert.deepEqual(adapter.getPaths?.(), {
+      global: path.join(agentDir, "custom-global.json"),
+      project: path.join(cwd, ".pi", "custom-project.json"),
+    });
+  });
+
+  it("persists override-only diffs, propagates global changes, and cleans up empty files", async () => {
+    const root = makeTempDir();
+    const agentDir = path.join(root, "agent");
+    const cwd = path.join(root, "repo");
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.mkdirSync(cwd, { recursive: true });
+
+    const schema = createSampleSchema();
+    const store = createSettingsStore(schema, { agentDir, cwd });
+    const paths = store.getPaths();
+
+    const initial = await store.load({ trustedProject: true });
+    assert.equal(initial.effective.mode, "balanced");
+    assert.equal(initial.provenance.mode, "default");
+
+    // Save global change for mode + maxItems
+    const gSave = await store.save(
+      { ...initial.effective, mode: "strict", maxItems: 25 },
+      { scope: "global", trustedProject: true, expectedSnapshot: initial.snapshot },
+    );
+    assert.deepEqual(gSave.writtenKeys.sort(), ["maxItems", "mode"]);
+    assert.equal(gSave.deletedFile, false);
+
+    const rawGlobal = JSON.parse(fs.readFileSync(paths.global, "utf8"));
+    assert.deepEqual(rawGlobal, { mode: "strict", maxItems: 25 });
+
+    // Save project override for maxItems only (and verify globalOnly is ignored on project save)
+    const pSave = await store.save(
+      { ...gSave.loaded.effective, maxItems: 50, globalOnly: "project-attempt" },
+      { scope: "project", trustedProject: true, expectedSnapshot: gSave.loaded.snapshot },
+    );
+    assert.deepEqual(pSave.writtenKeys, ["maxItems"]);
+    const rawProject = JSON.parse(fs.readFileSync(paths.project, "utf8"));
+    assert.deepEqual(rawProject, { maxItems: 50 });
+    assert.equal(pSave.loaded.provenance.mode, "global");
+    assert.equal(pSave.loaded.provenance.maxItems, "both");
+
+    // Patching globalOnly in project scope explicitly rejects
+    await assert.rejects(
+      () =>
+        store.patch(
+          { globalOnly: "bad" },
+          { scope: "project", trustedProject: true, expectedSnapshot: pSave.loaded.snapshot },
+        ),
+      /cannot be saved to "project" scope/i,
+    );
+
+    // Change global mode to "fast" -> propagates to effective and does NOT copy project's maxItems=50 into global
+    const gSave2 = await store.patch(
+      { mode: "fast" },
+      { scope: "global", trustedProject: true, expectedSnapshot: pSave.loaded.snapshot },
+    );
+    assert.equal(gSave2.loaded.effective.mode, "fast");
+    assert.equal(gSave2.loaded.effective.maxItems, 50);
+    assert.deepEqual(JSON.parse(fs.readFileSync(paths.global, "utf8")), {
+      mode: "fast",
+      maxItems: 25,
+    });
+
+    // Reverting project maxItems back to global (25) deletes project file via deleteWhenEmpty
+    const pRevert = await store.patch(
+      { maxItems: 25 },
+      { scope: "project", trustedProject: true, expectedSnapshot: gSave2.loaded.snapshot },
+    );
+    assert.equal(pRevert.deletedFile, true);
+    assert.equal(fs.existsSync(paths.project), false);
+    assert.equal(pRevert.loaded.effective.maxItems, 25);
+    assert.equal(pRevert.loaded.provenance.maxItems, "global");
+  });
+
+  it("enforces deleteWhenEmpty: false when configured", async () => {
+    const root = makeTempDir();
+    const agentDir = path.join(root, "agent");
+    const cwd = path.join(root, "repo");
+    const schema = createSampleSchema({ scopes: ["global"] });
+    const store = createSettingsStore(schema, {
+      agentDir,
+      cwd,
+      deleteWhenEmpty: false,
+    });
+    const initial = await store.load();
+    const s1 = await store.patch({ enabled: false }, { scope: "global", expectedSnapshot: initial.snapshot });
+    const s2 = await store.patch({ enabled: true }, { scope: "global", expectedSnapshot: s1.loaded.snapshot });
+    assert.equal(s2.deletedFile, false);
+    assert.equal(fs.existsSync(store.getPaths().global), true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(store.getPaths().global, "utf8")), {});
+  });
+});
+
+describe("store / untrusted project isolation", () => {
+  it("skips reading and refuses writing project scope when trustedProject is false", async () => {
+    const root = makeTempDir();
+    const agentDir = path.join(root, "agent");
+    const cwd = path.join(root, "repo");
+    const schema = createSampleSchema();
+    const store = createSettingsStore(schema, { agentDir, cwd });
+
+    // Write a hostile/corrupt project file (broken JSON or symlink)
+    const projectPath = store.getPaths().project;
+    fs.mkdirSync(path.dirname(projectPath), { recursive: true });
+    fs.writeFileSync(projectPath, "{not valid json!!!", "utf8");
+
+    // Untrusted load MUST NOT touch or fail on project file
+    const untrustedLoaded = await store.load({ trustedProject: false });
+    assert.equal(untrustedLoaded.trustedProject, false);
+    assert.equal(untrustedLoaded.snapshot.projectHash, null);
+    assert.equal(untrustedLoaded.effective.enabled, true);
+
+    // Untrusted save/patch/restoreDefaults MUST refuse project scope
+    await assert.rejects(
+      () => store.save(untrustedLoaded.effective, { scope: "project", trustedProject: false }),
+      /not trusted/i,
+    );
+    await assert.rejects(
+      () => store.patch({ enabled: false }, { scope: "project", trustedProject: false }),
+      /not trusted/i,
+    );
+    await assert.rejects(
+      () => store.restoreDefaults({ scope: "project", trustedProject: false }),
+      /not trusted/i,
+    );
+
+    // Trusted load sees the corrupt JSON
+    await assert.rejects(() => store.load({ trustedProject: true }), SyntaxError);
+  });
+
+  it("refuses saving to unsupported scope", async () => {
+    const root = makeTempDir();
+    const schema = createSampleSchema({ scopes: ["global"] });
+    const store = createSettingsStore(schema, { agentDir: root, cwd: root });
+    const loaded = await store.load({ trustedProject: true });
+    await assert.rejects(
+      () => store.save(loaded.effective, { scope: "project", trustedProject: true }),
+      /not supported/i,
+    );
+  });
+});
+
+describe("store / defense-in-depth fs hardening", () => {
+  it("works under macOS /var and /tmp tempdirs while rejecting symlinks below baseRoot", () => {
+    const root = makeTempDir();
+    const validFile = path.join(root, "nested", "settings.json");
+    assertNoSymlinkSegments(validFile, root);
+    assertNoSymlinkSegments(path.join(os.tmpdir(), "nonexistent-settings-dir", "settings.json"));
+
+    const realTarget = path.join(root, "real.json");
+    fs.writeFileSync(realTarget, '{"enabled":false}\n', "utf8");
+
+    // 1. Symlinked target file
+    const fileLink = path.join(root, "link.json");
+    fs.symlinkSync(realTarget, fileLink);
+    assert.throws(
+      () => readJsonFileHardened(fileLink, { baseRoot: root }),
+      (err) => err instanceof SettingsSecurityError && err.code === "SYMLINK_REJECTED",
+    );
+    assert.throws(
+      () => writeJsonFileHardened(fileLink, { enabled: true }, { baseRoot: root }),
+      (err) => err instanceof SettingsSecurityError && err.code === "SYMLINK_REJECTED",
+    );
+    assert.throws(
+      () => deleteFileHardened(fileLink, root),
+      (err) => err instanceof SettingsSecurityError && err.code === "SYMLINK_REJECTED",
+    );
+
+    // 2. Dangling symlink target
+    const danglingLink = path.join(root, "dangling.json");
+    fs.symlinkSync(path.join(root, "missing.json"), danglingLink);
+    assert.throws(
+      () => readJsonFileHardened(danglingLink, { baseRoot: root }),
+      (err) => err instanceof SettingsSecurityError && err.code === "SYMLINK_REJECTED",
+    );
+
+    // 3. Symlinked intermediate directory below baseRoot
+    const realDir = path.join(root, "real-dir");
+    fs.mkdirSync(realDir, { recursive: true });
+    const dirLink = path.join(root, "dir-link");
+    fs.symlinkSync(realDir, dirLink);
+    assert.throws(
+      () => ensureSecureDir(path.join(dirLink, "sub"), root),
+      (err) => err instanceof SettingsSecurityError && err.code === "SYMLINK_REJECTED",
+    );
+    assert.throws(
+      () => writeJsonFileHardened(path.join(dirLink, "settings.json"), { enabled: true }, { baseRoot: root }),
+      (err) => err instanceof SettingsSecurityError && err.code === "SYMLINK_REJECTED",
+    );
+  });
+
+  it("rejects NUL bytes, empty paths, and non-regular files", () => {
+    const root = makeTempDir();
+    assert.throws(
+      () => assertNoSymlinkSegments("bad\0path.json"),
+      (err) => err instanceof SettingsSecurityError && err.code === "INVALID_PATH",
+    );
+    assert.throws(
+      () => assertNoSymlinkSegments("   "),
+      (err) => err instanceof SettingsSecurityError && err.code === "INVALID_PATH",
+    );
+    const dirPath = path.join(root, "a-dir");
+    fs.mkdirSync(dirPath);
+    assert.throws(
+      () => readJsonFileHardened(dirPath, { baseRoot: root }),
+      (err) => err instanceof SettingsSecurityError && err.code === "NOT_REGULAR_FILE",
+    );
+  });
+
+  it("sets 0o700 dir and 0o600 file permissions and leaves no leftover temp files", () => {
+    const root = makeTempDir();
+    const targetDir = path.join(root, "secure", "sub");
+    const targetFile = path.join(targetDir, "settings.json");
+
+    const hash = writeJsonFileHardened(targetFile, { enabled: false }, { baseRoot: root });
+    assert.equal(hash, computeJsonHash('{\n  "enabled": false\n}\n'));
+
+    if (process.platform !== "win32") {
+      const dirMode = fs.statSync(targetDir).mode & 0o777;
+      const fileMode = fs.statSync(targetFile).mode & 0o777;
+      assert.equal(dirMode, 0o700);
+      assert.equal(fileMode, 0o600);
+    }
+
+    const entries = fs.readdirSync(targetDir);
+    assert.deepEqual(entries, ["settings.json"]);
+  });
+
+  it("enforces 64 KiB size cap on both read and write", () => {
+    const root = makeTempDir();
+    const filePath = path.join(root, "big.json");
+    const oversizedPayload = { big: "a".repeat(MAX_SETTINGS_BYTES) };
+
+    assert.throws(
+      () => writeJsonFileHardened(filePath, oversizedPayload, { baseRoot: root }),
+      (err) => err instanceof SettingsSecurityError && err.code === "SIZE_LIMIT_EXCEEDED",
+    );
+    assert.equal(fs.readdirSync(root).filter((f) => f.startsWith(".settings.")).length, 0);
+
+    // Manually write an oversized file on disk and verify read rejects it
+    fs.writeFileSync(filePath, JSON.stringify(oversizedPayload), "utf8");
+    assert.throws(
+      () => readJsonFileHardened(filePath, { baseRoot: root }),
+      (err) => err instanceof SettingsSecurityError && err.code === "SIZE_LIMIT_EXCEEDED",
+    );
+  });
+
+  it("rejects secret keys recursively on write and strips them with warnings on read", async () => {
+    const root = makeTempDir();
+    const agentDir = path.join(root, "agent");
+    const cwd = path.join(root, "repo");
+    const filePath = path.join(root, "secrets.json");
+
+    for (const badPayload of [
+      { apiKey: "sk-123" },
+      { nested: { authToken: "tok" } },
+      { items: [{ clientSecret: "sec" }] },
+      { dbPassword: "pw" },
+      { authorizationHeader: "Bearer x" },
+      { userCredential: "cred" },
+    ]) {
+      assert.throws(
+        () => writeJsonFileHardened(filePath, badPayload, { baseRoot: root }),
+        (err) => err instanceof SettingsSecurityError && err.code === "SECRET_KEY_REJECTED",
+      );
+    }
+
+    // Write file directly to disk containing secret keys (including nested inside custom field)
+    const schema = createSampleSchema({ scopes: ["global"] });
+    const store = createSettingsStore(schema, { agentDir, cwd });
+    const globalPath = store.getPaths().global;
+    fs.mkdirSync(path.dirname(globalPath), { recursive: true });
+    fs.writeFileSync(
+      globalPath,
+      JSON.stringify({
+        enabled: false,
+        apiKey: "should-be-stripped",
+        metadata: { count: 3, nested: { apiToken: "hidden", label: "ok" } },
+      }),
+      "utf8",
+    );
+
+    const loaded = await store.load();
+    assert.equal(loaded.effective.enabled, false);
+    assert.equal(loaded.effective.metadata.count, 3);
+    assert.equal("apiToken" in loaded.effective.metadata.nested, false);
+    assert.ok(loaded.warnings.some((w) => w.includes("apiKey")));
+    assert.ok(loaded.warnings.some((w) => w.includes("metadata.nested.apiToken")));
+
+    // Strict read option rejects on read too
+    assert.throws(
+      () => readJsonFileHardened(globalPath, { baseRoot: agentDir, rejectSecretKeysOnRead: true }),
+      (err) => err instanceof SettingsSecurityError && err.code === "SECRET_KEY_REJECTED",
+    );
+  });
+
+  it("detects optimistic concurrency conflicts and supports force: true", async () => {
+    const root = makeTempDir();
+    const agentDir = path.join(root, "agent");
+    const cwd = path.join(root, "repo");
+    const schema = createSampleSchema({ scopes: ["global"] });
+    const store = createSettingsStore(schema, { agentDir, cwd });
+
+    const snapA = await store.load();
+    const snapB = await store.load();
+
+    const resA = await store.patch(
+      { maxItems: 20 },
+      { scope: "global", expectedSnapshot: snapA.snapshot },
+    );
+    assert.equal(resA.loaded.effective.maxItems, 20);
+
+    // Stale snapshot B must fail with ConcurrencyConflictError
+    await assert.rejects(
+      () =>
+        store.patch(
+          { maxItems: 30 },
+          { scope: "global", expectedSnapshot: snapB.snapshot },
+        ),
+      (err) => err instanceof ConcurrencyConflictError && err.code === "CONCURRENCY_CONFLICT" && err.scope === "global",
+    );
+
+    // Stale restoreDefaults must also fail
+    await assert.rejects(
+      () => store.restoreDefaults({ scope: "global", expectedSnapshot: snapB.snapshot }),
+      (err) => err instanceof ConcurrencyConflictError && err.scope === "global",
+    );
+
+    // force: true overrides stale snapshot
+    const forced = await store.patch(
+      { maxItems: 42 },
+      { scope: "global", expectedSnapshot: snapB.snapshot, force: true },
+    );
+    assert.equal(forced.loaded.effective.maxItems, 42);
+  });
+
+  it("runs legacy migrate hook and cleans up on restoreDefaults", async () => {
+    const root = makeTempDir();
+    const agentDir = path.join(root, "agent");
+    const cwd = path.join(root, "repo");
+
+    const schema = createSampleSchema({
+      migrate: (raw, scope) => {
+        const next = { ...raw };
+        if (typeof next.legacyFlag === "boolean" && next.enabled === undefined) {
+          next.enabled = next.legacyFlag;
+          delete next.legacyFlag;
+        }
+        if (scope === "project" && next.mode === "legacy") {
+          next.mode = "strict";
+        }
+        return next;
+      },
+    });
+
+    const store = createSettingsStore(schema, { agentDir, cwd });
+    const paths = store.getPaths();
+    fs.mkdirSync(path.dirname(paths.global), { recursive: true });
+    fs.mkdirSync(path.dirname(paths.project), { recursive: true });
+    fs.writeFileSync(paths.global, JSON.stringify({ legacyFlag: false }), "utf8");
+    fs.writeFileSync(paths.project, JSON.stringify({ mode: "legacy" }), "utf8");
+
+    const loaded = await store.load({ trustedProject: true });
+    assert.equal(loaded.effective.enabled, false);
+    assert.equal(loaded.effective.mode, "strict");
+
+    // restoreDefaults deletes only project scope
+    const restoredProj = await store.restoreDefaults({
+      scope: "project",
+      trustedProject: true,
+      expectedSnapshot: loaded.snapshot,
+    });
+    assert.equal(restoredProj.deletedFile, true);
+    assert.equal(fs.existsSync(paths.project), false);
+    assert.equal(fs.existsSync(paths.global), true);
+    assert.equal(restoredProj.loaded.effective.enabled, false);
+    assert.equal(restoredProj.loaded.effective.mode, "balanced");
+
+    // restoreDefaults again when file is already gone returns deletedFile: false
+    const restoredAgain = await store.restoreDefaults({
+      scope: "project",
+      trustedProject: true,
+      expectedSnapshot: restoredProj.loaded.snapshot,
+    });
+    assert.equal(restoredAgain.deletedFile, false);
+  });
+});
+
+describe("store / session and memory adapters", () => {
+  it("persists and resets settings via createSessionStorageAdapter", async () => {
+    const entries = [
+      { type: "message", customType: "ignored", data: { enabled: false } },
+      { type: "custom", customType: "other-ext", data: { mode: "strict" } },
+    ];
+    const adapter = createSessionStorageAdapter({
+      entryType: "sample-ext-settings",
+      appendEntry: (entryType, data) => {
+        entries.push({ type: "custom", customType: entryType, data });
+      },
+      getEntries: () => entries,
+      scope: "global",
+    });
+
+    const schema = createSampleSchema({ scopes: ["global"] });
+    const store = createSettingsStore(schema, { adapter });
+    assert.deepEqual(store.getPaths(), { global: "session://sample-ext-settings" });
+
+    const s0 = await store.load();
+    assert.equal(s0.effective.mode, "balanced");
+
+    const s1 = await store.patch(
+      { mode: "strict", tags: ["alpha", "beta"] },
+      { scope: "global", expectedSnapshot: s0.snapshot },
+    );
+    assert.equal(s1.loaded.effective.mode, "strict");
+    assert.deepEqual(s1.loaded.effective.tags, ["alpha", "beta"]);
+
+    // Concurrency conflict check
+    await assert.rejects(
+      () => store.patch({ enabled: false }, { scope: "global", expectedSnapshot: s0.snapshot }),
+      (err) => err instanceof ConcurrencyConflictError,
+    );
+
+    // Restore defaults appends tombstone so subsequent loads see defaults
+    const s2 = await store.restoreDefaults({
+      scope: "global",
+      expectedSnapshot: s1.loaded.snapshot,
+    });
+    assert.equal(s2.deletedFile, true);
+    assert.equal(s2.loaded.effective.mode, "balanced");
+    assert.deepEqual(s2.loaded.effective.tags, ["alpha"]);
+  });
+
+  it("persists, clones, and checks concurrency in createMemoryStorageAdapter", async () => {
+    const initialGlobal = { mode: "fast", tags: ["beta"] };
+    const adapter = createMemoryStorageAdapter({ global: initialGlobal });
+    // Mutating caller object must not affect stored state
+    initialGlobal.mode = "strict";
+
+    const schema = createSampleSchema();
+    const store = createSettingsStore(schema, { adapter });
+    assert.deepEqual(store.getPaths(), {
+      global: "memory://global",
+      project: "memory://project",
+    });
+
+    const loaded = await store.load({ trustedProject: true });
+    assert.equal(loaded.effective.mode, "fast");
+    assert.deepEqual(loaded.effective.tags, ["beta"]);
+
+    const saved = await store.patch(
+      { enabled: false },
+      { scope: "project", trustedProject: true, expectedSnapshot: loaded.snapshot },
+    );
+    assert.equal(saved.loaded.effective.enabled, false);
+    assert.equal(saved.loaded.provenance.enabled, "project");
+
+    await assert.rejects(
+      () => store.patch({ enabled: true }, { scope: "project", trustedProject: true, expectedSnapshot: loaded.snapshot }),
+      (err) => err instanceof ConcurrencyConflictError,
+    );
+
+    const restored = await store.restoreDefaults({
+      scope: "project",
+      trustedProject: true,
+      expectedSnapshot: saved.loaded.snapshot,
+    });
+    assert.equal(restored.deletedFile, true);
+    assert.equal(restored.loaded.effective.enabled, true);
+  });
+});
