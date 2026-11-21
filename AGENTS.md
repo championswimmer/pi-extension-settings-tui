@@ -1,0 +1,148 @@
+# AGENTS.md — pi-extension-settings-tui
+
+Operational guide for AI coding agents working in this repository. Keep this file aligned with the implementation when architecture, invariants, or tooling change.
+
+## What this repo is
+
+`pi-extension-settings-tui` is a **zero-runtime-dependency TypeScript/ESM library** (published to npm, Node `>=22`) that provides declarative settings schemas, hardened layered JSON persistence, a single-overlay `@earendil-works/pi-tui` dialog with fullscreen SGR mouse support, and automatic RPC/headless fallback for Pi (`@earendil-works/pi-coding-agent >= 1.5.0`) extensions.
+
+It is **not** a Pi extension itself (except for the unshipped dev fixture in `examples/demo-extension/`); it is a shared library consumed by Pi extensions.
+
+## Architecture & strict layer boundaries
+
+Preserve one-way dependency flow across the four layers:
+
+```text
+adapter  ──▶  dialog  ──▶  store  ──▶  schema
+```
+
+- **`src/schema/` (`./schema`)**: Pure TypeScript data model, `defineSettings()`, `field.*` builders, validators, `findSecretKeys`, `stripControlChars`, `deepEqual`, `cloneValue`, provenance & override-diff math. **MUST have zero Pi imports and zero Node built-in (`fs`/`path`/`os`) imports.**
+- **`src/store/` (`./store`)**: `SettingsStore`, hardened filesystem I/O (`fs-hardening.ts`), `createJsonFileStorageAdapter`, `createSessionStorageAdapter`, `createMemoryStorageAdapter`, error classes (`ConcurrencyConflictError`, `SettingsSecurityError`). **Imports ONLY Node built-ins (`node:*`) and `../schema/index.js` — zero Pi imports.**
+- **`src/dialog/` (`./dialog`)**: `SettingsDialogComponent`, `HitRegionTracker`, rounded box framing & height budgeting (`frame.ts`), and internal sub-routes (`routes/{confirm,text-input,select,multi-select}-route.ts`). Imports `@earendil-works/pi-tui`, type-only `Theme` / `KeybindingsManager` from `@earendil-works/pi-coding-agent`, `../schema/index.js`, and `../store/index.js`.
+- **`src/adapter/` (`./adapter`)**: `openSettingsDialog()` (singleton overlay lifecycle, `AbortSignal`, mode dispatch) and `runRpcSettingsMenu()` (`ctx.mode === "rpc"` fallback).
+- **`src/index.ts` (`.`)**: Unified barrel re-export of all four layers.
+
+## Repository map
+
+```text
+pi-extension-settings-tui/
+├── package.json                       # ESM package manifest, subpath exports, peerDeps, scripts
+├── tsconfig.json                      # strict, NodeNext, verbatimModuleSyntax, emits dist/
+├── README.md                          # Human-facing documentation & quickstart
+├── AGENTS.md                          # This file
+├── src/
+│   ├── index.ts
+│   ├── schema/
+│   │   ├── types.ts                   # Schema, field defs, InferSettingsValues, schema.Type
+│   │   ├── fields.ts                  # field.{boolean,enum,multiSelect,string,number,integer,custom}
+│   │   ├── validate.ts                # Field validation, SECRET_KEY_PATTERN, stripControlChars, deepEqual
+│   │   ├── define.ts                  # defineSettings(), resolveEffective, computeProvenance, diffForScope
+│   │   └── index.ts
+│   ├── store/
+│   │   ├── types.ts                   # StorageAdapter, LoadedSettings, ConcurrencyConflictError, SettingsSecurityError
+│   │   ├── fs-hardening.ts            # Symlink segment checks, 0o700/0o600 atomic writes, 64 KiB cap
+│   │   ├── json-adapter.ts            # Default & custom path resolution, optimistic hash checks
+│   │   ├── session-adapter.ts         # pi.appendEntry / session entry persistence adapter
+│   │   ├── memory-adapter.ts          # In-memory layered adapter for tests
+│   │   ├── settings-store.ts          # SettingsStore (load, save, patch, restoreDefaults)
+│   │   └── index.ts
+│   ├── dialog/
+│   │   ├── types.ts                   # HitRegion, DialogFrame, SettingsDialogOptions/Result
+│   │   ├── hit-test.ts                # HitRegionTracker & renderPillRow with visibleWidth spans
+│   │   ├── frame.ts                   # Box chrome, windowing math, tone mapping, scroll indicators
+│   │   ├── settings-dialog.ts         # Single-overlay SettingsDialogComponent (Component & Focusable)
+│   │   ├── routes/
+│   │   │   ├── confirm-route.ts
+│   │   │   ├── text-input-route.ts    # Input (single-line) & Editor (multiline, Ctrl+S)
+│   │   │   ├── select-route.ts        # Input + fuzzyFilter searchable picker
+│   │   │   └── multi-select-route.ts  # Searchable checklist + collapsible groups
+│   │   └── index.ts
+│   └── adapter/
+│       ├── types.ts                   # OpenSettingsDialogOptions/Result
+│       ├── rpc-fallback.ts            # ctx.ui.{select,input,editor,confirm,notify} schema-driven menu
+│       ├── open-settings-dialog.ts    # Singleton registry, ctx.mode dispatch, AbortSignal cleanup
+│       └── index.ts
+├── tests/
+│   ├── schema.test.mjs
+│   ├── store.test.mjs
+│   ├── dialog.test.mjs
+│   └── adapter.test.mjs
+└── examples/
+    └── demo-extension/index.ts        # Live Pi extension exercising every field kind & mouse mode
+```
+
+## Critical technical invariants (do not break)
+
+### TypeScript & packaging rules
+- Target `@earendil-works/pi-coding-agent` (`>=1.5.0`) and `@earendil-works/pi-tui` only — **never** import `@mariozechner/*`.
+- `tsconfig.json` uses `module: "NodeNext"`, `moduleResolution: "NodeNext"`, `strict: true`, `verbatimModuleSyntax: true`, and emits `.js`, `.d.ts`, and sourcemaps into `dist/`.
+- **All relative imports in `src/` MUST use `.js` extensions** and `import type` for type-only imports.
+- Keep `"dependencies"` absent/empty (zero runtime dependencies). Both `@earendil-works/*` packages stay in `peerDependencies` (marked optional in `peerDependenciesMeta` so `/schema` and `/store` consumers don't need Pi installed) and `devDependencies`.
+- `npm pack` ships ONLY `dist/`, `README.md`, `LICENSE`, and `package.json` (`"files"` whitelist). `dist/` is gitignored and built via `tsc` / `prepublishOnly`.
+
+### Pi TUI & overlay gotchas (v1.5.2+)
+1. **Never call `tui.hideOverlay()`**: `TuiBase.hideOverlay()` unconditionally pops the top of `overlayStack`, which can close the wrong overlay. Always close through the `done(result)` callback provided by `ctx.ui.custom()`.
+2. **Never stack nested overlays**: Do not call `ctx.ui.custom`/`select`/`input` from inside an open overlay. Push sub-views onto `SettingsDialogComponent`'s internal `Frame[]` stack instead.
+3. **Never call global `getKeybindings()`**: Always use the `keybindings` manager injected by `ctx.ui.custom((tui, theme, keybindings, done) => ...)` alongside `matchesKey` / `Key` from `@earendil-works/pi-tui`.
+4. **Strict terminal height budgeting**: Pi's `compositeOverlays` hard-slices lines exceeding `maxHeight`, clipping bottom borders and footers. Every `render(width)` pass MUST read `tui.terminal?.rows` and stay within `Math.max(8, rows - 4)` lines, and every line MUST satisfy `visibleWidth(line) <= width`.
+5. **Focus & cursor propagation**: `SettingsDialogComponent` and all sub-routes implement `Focusable` and propagate `focused` to child `Input` / `Editor` / custom components so `CURSOR_MARKER` positions the hardware/IME cursor accurately. Keep `capturesViewportInput = true` on `SettingsDialogComponent`.
+6. **Singleton overlay lifecycle**: `openSettingsDialog` tracks open dialogs by `schema.id`. Re-invoking while open focuses the existing `OverlayHandle`, calls `component.navigateTo(...)`, and returns `closedBy: "reused"` without opening a second overlay. Wire `ctx.signal` to `component.abort()` and clean up listeners/registry entries in `finally`.
+
+### Fullscreen mouse (`tui.mode === "fullscreen"`) invariants
+- Populate `HitRegionTracker` during every `render(width)` pass using exact 0-based overlay-local `y` and `visibleWidth`-measured `[x0, x1)` spans.
+- **Returning `{ handled: true }` on `press` is mandatory**: without it, `TuiAltScreen` falls through to terminal text selection and will NOT synthesize `"click"` on release.
+- Dead-space `press` inside the dialog bounds returns `{ handled: true, render: false }` so clicks inside the overlay never leak into background selection.
+- Forward mouse events hitting an active sub-route child with translated child-local `{ x: event.x - bounds.x, y: event.y - bounds.y, width: bounds.width, height: bounds.height }`.
+- Inside `tmux` / `zellij` / `screen`, Pi omits `\x1b[?1003h` (all-motion tracking), so `"move"` hover events will not fire there — never rely on hover for discoverability or state.
+
+### Storage & security invariants
+- Default file locations:
+  - Global: `path.join(agentDir, schema.id, fileName)` (`agentDir` = `$PI_CODING_AGENT_DIR` else `~/.pi/agent`, default `fileName` = `"settings.json"`).
+  - Project: `path.join(cwd, ".pi", "agent", schema.id, fileName)`.
+- Override-only persistence: `global` stores only diffs from defaults; `project` stores only diffs from `global ?? defaults`. Empty diffs delete the layer file when `deleteWhenEmpty !== false`.
+- **macOS `/var` & `/tmp` symlink caveat**: `assertNoSymlinkSegments` resolves `baseRoot` via `realpathSync` first and checks segments strictly **below** `baseRoot` + the target file (`lstatSync` + `O_NOFOLLOW`) so macOS OS-level symlinks (`/tmp -> /private/tmp`, `/var -> /private/var`) do not false-fail while real symlinks inside the storage root are rejected.
+- Atomic writes: create parent dirs `0o700`, open `.settings.<uuid>.tmp` with `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW` mode `0o600`, write UTF-8, `fsyncSync`, close, re-check target is not symlink, `renameSync`, clean up temp file in `finally`.
+- Enforce `MAX_SETTINGS_BYTES = 64 * 1024` on both read and write.
+- Reject keys matching `SECRET_KEY_PATTERN` (`/api.?key|token|secret|password|authorization|credential/i`) recursively on write (`SettingsSecurityError("SECRET_KEY_REJECTED")`); strip with warnings on read.
+- Optimistic concurrency: compare SHA-256 digests (`expectedHash` / `expectedSnapshot`) before write/delete and throw `ConcurrencyConflictError` on mismatch unless `force: true`.
+- Project scope is strictly gated on `trustedProject` (defaulting to `ctx.isProjectTrusted()`).
+
+### Explicit non-goals
+- Do **not** add domain-specific pickers (LLM model registries, auth credential lookups, MCP server discovery) to this library — host extensions supply those via `field.custom`.
+- Do **not** store secrets/credentials.
+- Do **not** grow this into a generic TUI layout framework.
+
+## Verification workflow
+
+### 1. Offline build, tests & tarball check
+Run after every change:
+
+```bash
+npm run clean
+npm run typecheck
+npm test
+npm pack --dry-run
+```
+
+`npm test` runs `npm run build && node --test tests/*.test.mjs` (Node built-in test runner, zero extra test deps). Keep unit tests fast and offline.
+
+### 2. Live interactive verification in Pi + tmux
+Mocked unit tests do not substitute for visual/PTY verification after dialog or mouse changes. Test against real `pi` in an isolated temp directory and private tmux session:
+
+```bash
+TMP_DIR=$(mktemp -d)
+mkdir -p "$TMP_DIR/agent" "$TMP_DIR/project"
+tmux new-session -d -s pi-settings-smoke -x 112 -y 34 -c "$TMP_DIR/project" \
+  "PI_CODING_AGENT_DIR=\"$TMP_DIR/agent\" pi --offline --no-session --no-mcp --no-skills --no-prompt-templates --no-context-files --tui-mode fullscreen --approve -ne -e $(pwd)/examples/demo-extension/index.ts"
+```
+
+- Drive `/demo-settings` via `tmux send-keys` and inspect renders with `tmux capture-pane -p`.
+- Test fullscreen SGR 1006 mouse clicks with literal `\033[<0;<1-based-col>;<1-based-row>M` (press) followed by `m` (release).
+- Also verify `--tui-mode regular` renders keyboard-only footer hints cleanly.
+- Always kill the temporary tmux session (`tmux kill-session -t pi-settings-smoke`) and delete `$TMP_DIR` when done.
+
+## Git & release conventions
+
+- Keep `package.json` and `package-lock.json` versions in sync.
+- Never run `npm publish`, create release tags, or force-push without explicit user authorization.
+- Keep `README.md` human-oriented (value proposition, visual preview, usage examples) and put internal architecture, Pi gotchas, and agent workflow rules here in `AGENTS.md`.

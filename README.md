@@ -1,16 +1,60 @@
 # pi-extension-settings-tui
 
-Declarative, mouse-capable TUI settings dialog and hardened layered JSON persistence library for [Pi](https://github.com/earendil-works/pi-coding-agent) extensions over `@earendil-works/pi-tui`.
+A declarative settings dialog and layered JSON persistence library for [Pi](https://github.com/earendil-works/pi-coding-agent) extensions, built on `@earendil-works/pi-tui`.
 
-- **Zero runtime dependencies** (Node.js `>=22.0.0`, pure ESM + strict TypeScript)
-- **Declarative schema & exact TS inference** (`typeof schema.Type` infers literal unions for `enum` and `multiSelect`)
-- **Single-overlay `@earendil-works/pi-tui` dialog** with an internal sub-route stack (`ConfirmRoute`, `TextInputRoute`, `SelectRoute`, `MultiSelectRoute`, and `custom` sub-routes) and strict terminal height budgeting
-- **Fullscreen SGR mouse support** (`capturesViewportInput`, clickable tabs, rows, action pills, wheel scrolling) alongside full keyboard navigation
-- **Layered Global & Project overrides** (`defaults -> global -> project`), writing only overridden keys and deleting empty layer files cleanly
-- **Hardened file I/O**: symlink segment rejection, `0o700`/`0o600` atomic temp-file writes, 64 KiB size cap, recursive secret-key rejection, SHA-256 optimistic concurrency, and project trust gating
-- **Configurable storage paths & adapters**: customize `fileName`, `globalPath`, or `projectPath` (string or resolver function), or use `createSessionStorageAdapter` / `createMemoryStorageAdapter`
-- **Draft (`Ctrl+S`) & Immediate save modes**
-- **Automatic RPC & headless fallback** (`ctx.mode === "rpc"` menus via `ctx.ui.*`, structured non-opening result in `print` / `json` / `!ctx.hasUI`)
+Define your extension's settings schema once and get:
+
+- **A single-overlay TUI dialog** with tabs, searchable pickers, collapsible multi-select checklists, inline text/number editors, and custom sub-routes — styled with the user's active Pi theme.
+- **Native mouse support in fullscreen TUI mode** — click tabs, toggle booleans, click rows, scroll with the wheel, and click footer action pills (`[Ctrl+S Save]`, `[Esc Discard]`, `[Esc Back]`), with full keyboard support everywhere.
+- **Global & Project layered overrides** — persists only keys that differ from defaults (or from global overrides), shows provenance dots (`●`) at a glance, and respects Pi's project trust model.
+- **Configurable settings file names & paths** — customize the filename or path resolvers to fit existing extensions without breaking user configs, or plug in Pi session-entry storage.
+- **Hardened file I/O out of the box** — atomic writes (`0o600`), symlink refusal, 64 KiB cap, secret-key rejection, control-character sanitization, and optimistic concurrency checks.
+- **Automatic RPC & non-TUI fallback** — generates a working `ctx.ui.select` / `ctx.ui.input` menu in RPC mode and returns structured diagnostics in headless (`print`/`json`) mode.
+- **Zero runtime dependencies** — pure ESM, strict TypeScript (`typeof schema.Type` infers exact literal unions), Node `>=22`.
+
+---
+
+## Preview
+
+Rendered inside Pi (`--tui-mode fullscreen`):
+
+```text
+╭────────────────────────────────────────────────────────────────────────────────────╮
+│ Demo Settings                                                   ● Unsaved [Global] │
+│  General   Filters   Advanced                                                      │
+├────────────────────────────────────────────────────────────────────────────────────┤
+│ ❯ Enable extension                         ●                                   Off │
+│   Mode                                       ●                              Strict │
+│   Region                                   ●                              AP South │
+│ ────────────────────────────────────────────────────────────────────────────────── │
+│   Save scope                                                                Global │
+│   Restore defaults                                                   Reset global… │
+│ Toggle demo extension behavior on or off.                                          │
+│ Saved: ● Global · ● Project · ● ● Both                                             │
+│ Click/Enter edit · Tab tabs · Wheel scroll             [Ctrl+S Save] [Esc Discard] │
+╰────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+Multi-select checklist with search and collapsible groups:
+
+```text
+╭────────────────────────────────────────────────────────────────────────────────────╮
+│ Demo Settings › Filters › Active tags                           ● Unsaved [Global] │
+├────────────────────────────────────────────────────────────────────────────────────┤
+│ Select feature tags grouped by stability tier.                                     │
+│ / Filter items...                                                                  │
+│ ❯ [-] Core (2/3)                                                                   │
+│     [x] Audit log                                                                  │
+│     [x] Response cache                                                             │
+│     [ ] Latency metrics                                                            │
+│   [-] Experimental (0/2)                                                           │
+│     [ ] Mouse highlights                                                           │
+│     [ ] Trace storage I/O                                                          │
+│ [Enter Apply]  [Esc Cancel] 2 selected                                             │
+│ Space toggle · Ctrl+A all · Enter apply/fold · Esc cancel                          │
+│ Click or use keys inside view                                           [Esc Back] │
+╰────────────────────────────────────────────────────────────────────────────────────╯
+```
 
 ---
 
@@ -20,22 +64,13 @@ Declarative, mouse-capable TUI settings dialog and hardened layered JSON persist
 npm install pi-extension-settings-tui
 ```
 
-### Peer Dependencies
-
-`@earendil-works/pi-coding-agent` (`>=1.5.0`) and `@earendil-works/pi-tui` (`*`) are optional peer dependencies—extensions running inside Pi already have them available, while standalone consumers of `pi-extension-settings-tui/schema` or `pi-extension-settings-tui/store` do not need to install them.
-
-```json
-{
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=1.5.0",
-    "@earendil-works/pi-tui": "*"
-  }
-}
-```
+`@earendil-works/pi-coding-agent` (`>=1.5.0`) and `@earendil-works/pi-tui` are optional peer dependencies — they are already provided when your extension runs inside Pi, and aren't needed if you only import the standalone `/schema` or `/store` subpaths.
 
 ---
 
 ## Quickstart
+
+Declare your schema once, infer its TypeScript type, and wire `openSettingsDialog` into a Pi slash command:
 
 ```ts
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -59,13 +94,13 @@ export const mySchema = defineSettings({
     enabled: field.boolean({
       tab: "general",
       label: "Enable extension",
-      description: "Toggle automatic analysis on session start.",
+      description: "Toggle extension behavior without unloading.",
       default: true,
     }),
     mode: field.enum({
       tab: "general",
       label: "Mode",
-      description: "Choose how aggressively checks are applied.",
+      description: "Choose how strictly checks are applied.",
       default: "balanced",
       options: [
         { value: "off", label: "Off", tone: "muted" },
@@ -79,6 +114,7 @@ export const mySchema = defineSettings({
       default: 2,
       min: 0,
       max: 10,
+      step: 1,
       unit: "attempts",
     }),
     ignoredGlobs: field.multiSelect({
@@ -87,15 +123,16 @@ export const mySchema = defineSettings({
       default: ["node_modules/**"],
       allowCustom: true,
       options: [
-        { value: "node_modules/**", label: "node_modules/**" },
-        { value: "dist/**", label: "dist/**" },
-        { value: ".git/**", label: ".git/**" },
+        { value: "node_modules/**", label: "node_modules/**", group: "Dependencies" },
+        { value: "dist/**", label: "dist/**", group: "Build" },
+        { value: ".git/**", label: ".git/**", group: "VCS" },
       ],
+      collapsibleGroups: true,
     }),
   },
 });
 
-// Exact inferred TypeScript type:
+// Inferred type:
 // { enabled: boolean; mode: "off" | "balanced" | "strict"; maxRetries: number; ignoredGlobs: string[] }
 export type MySettings = typeof mySchema.Type;
 
@@ -110,14 +147,14 @@ export default function myExtension(pi: ExtensionAPI) {
         store,
         onApply: (next, meta) => {
           ctx.ui.notify(
-            `Applied ${meta.scope} settings (${meta.writtenKeys.length} overridden)`,
+            `Saved ${meta.scope} settings (${meta.writtenKeys.length} override(s))`,
             "info",
           );
         },
       });
 
       if (result.saved) {
-        // Use result.values (typed as MySettings)
+        // result.values is typed as MySettings
       }
     },
   });
@@ -126,59 +163,61 @@ export default function myExtension(pi: ExtensionAPI) {
 
 ---
 
-## Field Types Reference
+## Declarative Field Types
 
-All field builders are exported on `field` and share common base options: `tab?`, `label`, `description?`, `default`, `experimental?`, `disabled?` (boolean or `(values) => boolean`), `visibleWhen?` (`(values) => boolean`), `format?`, `tone?`, and `scopes?` (`("global" | "project")[]`).
+Every builder on `field` supports common options: `tab?`, `label`, `description?`, `default`, `experimental?` (renders `[lab]`), `disabled?` (boolean or `(values) => boolean`), `visibleWhen?` (`(values) => boolean`), `format?`, `tone?`, and `scopes?`.
 
-| Builder | Inferred TS Type | Key Options | Dialog Interaction |
-| :--- | :--- | :--- | :--- |
-| `field.boolean` | `boolean` | `trueLabel?`, `falseLabel?` | Single-key/single-click toggle (`On` / `Off` by default) |
-| `field.enum` | Literal union `T` | `options` (`{ value, label, description?, tone? }[]`), `display?` (`"auto" \| "cycle" \| "picker"`) | Cycles inline or opens searchable `SelectRoute` |
-| `field.multiSelect` | `T[]` | `options` (array or `() => options`), `minItems?`, `maxItems?`, `maxItemLength?`, `allowCustom?`, `collapsibleGroups?`, `emptyLabel?` | Opens searchable `MultiSelectRoute` checklist with optional collapsible groups |
-| `field.string` | `string` | `placeholder?`, `minLength?`, `maxLength?`, `pattern?`, `patternMessage?`, `multiline?`, `trim?`, `stripControlChars?` (default `true`) | Opens `TextInputRoute` (`Input`, or `Editor` with `Ctrl+S` when `multiline: true`) |
-| `field.number` | `number` | `min?`, `max?`, `integer?`, `step?`, `placeholder?`, `unit?` | Opens `TextInputRoute` with finite numeric validation |
-| `field.integer` | `number` | Same as `field.number` with `integer: true` enforced (`Number.isSafeInteger`) | Opens `TextInputRoute` with safe-integer validation |
-| `field.custom<T>` | `T` | `validate?`, `normalize?`, `openSubroute?`, `rpcEdit?` | Pushes custom `Component & Focusable` sub-route (or uses `rpcEdit` in RPC mode) |
+| Builder | TypeScript Type | Dialog Experience |
+| :--- | :--- | :--- |
+| `field.boolean` | `boolean` | Instant inline toggle on `Enter`, `Space`, or single click (`trueLabel?`, `falseLabel?`) |
+| `field.enum` | Literal union `T` | Inline cycle for ≤3 options or searchable picker with per-option help (`display?: "auto" \| "cycle" \| "picker"`) |
+| `field.multiSelect` | `T[]` | Searchable `[x]`/`[ ]` checklist with optional collapsible groups (`collapsibleGroups`, `minItems`, `maxItems`, `allowCustom`) |
+| `field.string` | `string` | Single-line input or multiline editor (`multiline: true`, `minLength`, `maxLength`, `pattern`, `trim`) |
+| `field.number` | `number` | Numeric input with `[min, max]` bounds, optional `unit`, and `←`/`→` inline stepping (`step`) |
+| `field.integer` | `number` | Safe-integer variant of `field.number` |
+| `field.custom<T>` | `T` | Escape hatch for extension-owned pickers (e.g. model/agent pickers) via `openSubroute` and optional `rpcEdit` |
 
 ---
 
-## Configurable Storage Paths & File Names
+## Saving, Scopes & Custom File Paths
 
-By default, `createJsonFileStorageAdapter` / `createSettingsStore` store overrides at:
+Settings resolve in layers: **defaults → global → project** (with project automatically skipped unless the current project is trusted via `ctx.isProjectTrusted()`).
+
+- **Override-only files**: Saving to Global stores only keys that differ from defaults; saving to Project stores only keys that differ from the effective Global value. Changing a global setting automatically flows through to projects that haven't overridden it.
+- **Provenance dots**: A 3-cell column shows whether each setting comes from Global (`●  `), Project (`  ●`), or Both (`● ●`).
+- **Restore defaults**: Built-in row cleanly deletes the active scope's overrides after confirmation.
+
+### Customizing File Names and Paths
+
+By default, settings live at:
 
 - **Global**: `~/.pi/agent/<id>/<fileName>` (default `fileName`: `settings.json`; respects `$PI_CODING_AGENT_DIR`)
 - **Project**: `<cwd>/.pi/agent/<id>/<fileName>`
 
-Only values that differ from defaults (for `global`) or from the effective global value / default (for `project`) are written. When a scope has zero overrides, its file is deleted cleanly (`deleteWhenEmpty: true` by default).
-
-### Customizing Paths or File Names
-
-Configure `storage` on `defineSettings(...)` or pass overrides to `createSettingsStore(...)` / `openSettingsDialog(...)`:
+You can match any existing extension's config layout using `storage` on `defineSettings(...)` (or overrides on `createSettingsStore` / `openSettingsDialog`):
 
 ```ts
 const schema = defineSettings({
-  id: "checklist",
-  title: "Checklist Settings",
+  id: "my-extension",
+  title: "My Extension",
   storage: {
-    fileName: "checklist.json",
-    globalPath: ({ agentDir, fileName }) => `${agentDir}/extensions/${fileName}`,
+    fileName: "my-extension.json",
+    globalPath: ({ agentDir, fileName }) => `${agentDir}/${fileName}`,
     projectPath: ({ cwd, fileName }) => `${cwd}/.pi/${fileName}`,
   },
   fields: { /* ... */ },
 });
 ```
 
-`globalPath` and `projectPath` accept either a path string (absolute, or relative to `agentDir` / `cwd`) or a resolver function receiving `{ agentDir, id, fileName }` / `{ cwd, id, fileName }`.
+### Session-Scoped Storage (No Disk Files)
 
-### Session-Scoped & In-Memory Storage
-
-For extensions that persist configuration inside Pi session entries rather than on disk, use `createSessionStorageAdapter`:
+For extensions that store settings inside Pi session entries (`pi.appendEntry`) instead of JSON files:
 
 ```ts
 import { createSessionStorageAdapter, createSettingsStore } from "pi-extension-settings-tui/store";
 
 const adapter = createSessionStorageAdapter({
-  entryType: "my-extension-settings",
+  entryType: "my-extension:settings:v1",
   appendEntry: (type, data) => pi.appendEntry(type, data),
   getEntries: () => ctx.sessionManager.getEntries(),
 });
@@ -186,65 +225,78 @@ const adapter = createSessionStorageAdapter({
 const store = createSettingsStore(schema, { adapter });
 ```
 
-For unit tests, use `createMemoryStorageAdapter(initial?)` for zero-disk layered storage with full SHA-256 concurrency checks.
-
 ---
 
-## Fullscreen Mouse Mode vs Regular Mode
+## Keyboard & Fullscreen Mouse Controls
 
-`SettingsDialogComponent` opens as a single centered Pi overlay (`ctx.ui.custom(..., { overlay: true })`) with `capturesViewportInput = true`.
+### Keyboard
 
-### Keyboard Controls
-
-| Context | Keys | Action |
+| Where | Keys | Action |
 | :--- | :--- | :--- |
-| Root list | `↑` / `↓`, `PgUp` / `PgDn` | Move selection / scroll list within terminal height budget |
-| Root list | `Tab` / `Shift+Tab` | Switch tabs (when multiple tabs are defined) |
-| Root list | `Enter` / `Space` | Toggle boolean, cycle/pick enum, open sub-route, toggle scope, or restore defaults |
-| Draft mode | `Ctrl+S` | Save changes to the active scope (`global` or `project`) |
-| Root / Sub-route | `Esc` | Cancel/discard (with confirmation if draft has unsaved changes) or pop sub-route (`[Esc Back]`) |
-| `MultiSelectRoute` | `Space`, `Ctrl+A`, `Enter` | Toggle item/group, toggle all filtered items, apply selection |
-| `TextInputRoute` | `Enter` (single-line) / `Ctrl+S` (multiline) | Validate & commit text/number value |
-| `ConfirmRoute` | `y` / `n` / `←` / `→` / `Tab` / `Enter` | Confirm or cancel action |
+| Settings list | `↑` / `↓`, `PgUp` / `PgDn` | Move selection / scroll list |
+| Settings list | `Tab` / `Shift+Tab` | Switch tabs |
+| Settings list | `Enter` / `Space` | Toggle boolean, cycle/open picker, edit value, switch scope, or restore defaults |
+| Number / Integer row | `←` / `→` | Step value inline when `step` (or integer default `1`) applies |
+| Draft mode | `Ctrl+S` | Save changes to the active scope |
+| Anywhere | `Esc` | Go back from sub-route, discard/confirm unsaved draft, or close dialog |
+| Multi-select | `Space`, `Ctrl+A`, `Enter` | Toggle item or fold group, toggle all visible items, apply selection |
+| Multiline text | `Ctrl+S` | Commit multiline editor value |
 
-### Fullscreen SGR Mouse Support
+### Fullscreen Mouse Mode (`--tui-mode fullscreen`)
 
-When running in Pi's fullscreen alt-screen mode (`tui.mode === "fullscreen"`), `handleMouse(event)` tracks exact 0-based overlay-local hit regions on every render pass:
+When Pi runs in fullscreen alt-screen mode (`tui.mode === "fullscreen"`), mouse interactions work out of the box:
 
-- **Tabs**: single click switches active tab
-- **List rows**: first click selects the row; clicking an already-selected row, double-clicking (`clickCount === 2`), clicking a `boolean` row, or clicking a management row (`Save scope`, `Restore defaults`) activates it immediately
-- **Mouse wheel**: scrolls the active list or sub-route list without moving focus out of the dialog
-- **Footer & route pills**: click `[Ctrl+S Save]`, `[Esc Discard]` / `[Esc Close]`, `[Esc Back]`, `[Confirm]`, `[Cancel]`, `[Enter Apply]`, or `[R Reload]` on conflict
-- **Dead-space absorption**: left-presses inside the dialog return `{ handled: true }` so the alt-screen does not fall through to terminal text selection
-- **Regular (inline) mode**: keyboard hints adapt automatically when not in fullscreen mouse mode
+- Click **tab chips** to switch tabs.
+- Click a **boolean** or management row (`Save scope`, `Restore defaults`) to toggle/activate immediately; click any other row once to select and a second time (or double-click) to edit.
+- Scroll with the **mouse wheel** on the main list, searchable pickers, and multi-select checklists.
+- Click **footer pills** (`[Ctrl+S Save]`, `[Esc Discard]`, `[Esc Close]`, `[Esc Back]`, `[Enter Apply]`, `[Confirm]`, `[Cancel]`, `[R Reload]`).
+- In **regular** (inline) mode, footer hints automatically switch to keyboard-only guidance.
+
+### RPC & Headless Mode
+
+- **`ctx.mode === "rpc"`**: Automatically opens an interactive menu built with `ctx.ui.select`, `ctx.ui.input`, `ctx.ui.editor`, and `ctx.ui.confirm` from the same schema.
+- **`print` / `json` / `!ctx.hasUI`**: Loads effective settings without opening a UI and returns `{ opened: false, values, paths, warnings }`.
 
 ---
 
 ## Subpath Exports
 
-Import everything from the root package or use targeted subpaths to keep non-TUI bundles minimal:
+Import everything from the root package or pull in individual layers:
 
-| Subpath | Contents | Pi / Node Requirements |
+| Import Path | What It Contains | Runtime Requirements |
 | :--- | :--- | :--- |
-| `pi-extension-settings-tui` | Unified re-exports of all layers | Full package |
-| `pi-extension-settings-tui/schema` | `defineSettings`, `field`, validators, `findSecretKeys`, `stripControlChars`, `deepEqual`, `cloneValue` | **Zero Pi imports, zero Node `fs` imports** |
-| `pi-extension-settings-tui/store` | `SettingsStore`, `createSettingsStore`, `createJsonFileStorageAdapter`, `createSessionStorageAdapter`, `createMemoryStorageAdapter`, `fs-hardening`, error classes | Node built-ins only (**zero Pi imports**) |
-| `pi-extension-settings-tui/dialog` | `SettingsDialogComponent`, `ConfirmRoute`, `TextInputRoute`, `SelectRoute`, `MultiSelectRoute`, `HitRegionTracker`, frame helpers | `@earendil-works/pi-tui`, `@earendil-works/pi-coding-agent` (`Theme` type) |
-| `pi-extension-settings-tui/adapter` | `openSettingsDialog`, `runRpcSettingsMenu`, result/option types | `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui` |
+| `pi-extension-settings-tui` | Complete library | Pi extension runtime |
+| `pi-extension-settings-tui/schema` | `defineSettings`, `field`, validation, provenance & diff helpers | Pure JS/TS (no Pi or Node `fs` imports) |
+| `pi-extension-settings-tui/store` | `SettingsStore`, hardened JSON / session / memory adapters | Node.js built-ins only (no Pi imports) |
+| `pi-extension-settings-tui/dialog` | `SettingsDialogComponent`, `SelectRoute`, `MultiSelectRoute`, `TextInputRoute`, `ConfirmRoute` | `@earendil-works/pi-tui`, `@earendil-works/pi-coding-agent` |
+| `pi-extension-settings-tui/adapter` | `openSettingsDialog`, `runRpcSettingsMenu` | `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui` |
 
 ---
 
-## Security & Hardening
+## Security & Reliability
 
-`pi-extension-settings-tui` treats settings files—especially repository-local `.pi/` files—as untrusted input:
+Because `.pi/` settings can live inside untrusted repositories, persistence is hardened by default:
 
-- **Symlink rejection**: `assertNoSymlinkSegments` resolves any `baseRoot` via `realpathSync` (preserving OS root symlinks on macOS such as `/var -> /private/var` and `/tmp -> /private/tmp`) and rejects symlinks in every directory/file segment beneath `baseRoot`, paired with `O_NOFOLLOW` on open.
-- **Strict permissions & atomic writes**: directories are created with `0o700`; writes stream to a `0o600` (`O_CREAT | O_EXCL | O_NOFOLLOW`) temporary file, `fsync`, and atomically `rename` into place.
-- **64 KiB read & write cap**: rejects oversized files or payloads with `SettingsSecurityError` (`SIZE_LIMIT_EXCEEDED`).
-- **Secret-key defense**: keys matching `/api.?key|token|secret|password|authorization|credential/i` are recursively rejected on write (`SettingsSecurityError` with `SECRET_KEY_REJECTED`) and stripped with warnings on read.
-- **Control character sanitization**: `stripControlChars` strips ANSI CSI/OSC/DCS/ESC sequences and C0/C1 control characters from string values by default.
-- **Optimistic concurrency**: tracks SHA-256 digests (`expectedSnapshot` / `expectedHash`) and throws `ConcurrencyConflictError` if a layer changes on disk between load and save.
-- **Project trust gating**: `trustedProject: false` (defaulting to `ctx.isProjectTrusted()` when available) prevents reading or writing project-scope overrides.
+- **Project trust gating**: Project overrides are neither read nor written unless `ctx.isProjectTrusted()` (or explicit `trustedProject: true`) is true.
+- **Symlink refusal & atomic writes**: Rejects symlink segments beneath the base directory (`lstat` + `O_NOFOLLOW`), creates `0o700` directories, writes `0o600` temp files with `fsync`, and atomically renames into place.
+- **Size & secret guards**: Enforces a 64 KiB cap on read/write and rejects secret-like keys (`apiKey`, `token`, `secret`, `password`, `authorization`, `credential`) recursively on write.
+- **Optimistic concurrency**: Detects external edits on disk between opening and saving the dialog, prompting you to reload rather than silently overwriting.
+
+---
+
+## Try the Demo Extension
+
+Clone the repo, build, and launch the included example extension inside Pi:
+
+```bash
+git clone https://github.com/championswimmer/pi-extension-settings-tui.git
+cd pi-extension-settings-tui
+npm install
+npm run build
+pi --offline --no-session --approve -ne -e ./examples/demo-extension/index.ts
+```
+
+Then run `/demo-settings` (draft mode) or `/demo-settings-immediate` inside Pi.
 
 ---
 
