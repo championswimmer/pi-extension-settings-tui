@@ -18,7 +18,7 @@ adapter  ──▶  dialog  ──▶  store  ──▶  schema
 
 - **`src/schema/` (`./schema`)**: Pure TypeScript data model, `defineSettings()`, `field.*` builders, validators, `findSecretKeys`, `stripControlChars`, `deepEqual`, `cloneValue`, provenance & override-diff math. **MUST have zero Pi imports and zero Node built-in (`fs`/`path`/`os`) imports.**
 - **`src/store/` (`./store`)**: `SettingsStore`, hardened filesystem I/O (`fs-hardening.ts`), `createJsonFileStorageAdapter`, `createSessionStorageAdapter`, `createMemoryStorageAdapter`, error classes (`ConcurrencyConflictError`, `SettingsSecurityError`). **Imports ONLY Node built-ins (`node:*`) and `../schema/index.js` — zero Pi imports.**
-- **`src/dialog/` (`./dialog`)**: `SettingsDialogComponent`, `HitRegionTracker`, rounded box framing & height budgeting (`frame.ts`), and internal sub-routes (`routes/{confirm,text-input,select,multi-select}-route.ts`). Imports `@earendil-works/pi-tui`, type-only `Theme` / `KeybindingsManager` from `@earendil-works/pi-coding-agent`, `../schema/index.js`, and `../store/index.js`.
+- **`src/dialog/` (`./dialog`)**: `SettingsDialogComponent`, `HitRegionTracker`, rounded box framing & height budgeting (`frame.ts`), and internal sub-routes (`routes/{confirm,text-input,select,multi-select,model-picker}-route.ts`). Imports `@earendil-works/pi-tui`, type-only `Theme` / `KeybindingsManager` from `@earendil-works/pi-coding-agent`, `../schema/index.js`, and `../store/index.js`.
 - **`src/adapter/` (`./adapter`)**: `openSettingsDialog()` (singleton overlay lifecycle, `AbortSignal`, mode dispatch) and `runRpcSettingsMenu()` (`ctx.mode === "rpc"` fallback).
 - **`src/index.ts` (`.`)**: Unified barrel re-export of all four layers.
 
@@ -40,7 +40,7 @@ pi-extension-settings-tui/
 │   ├── index.ts
 │   ├── schema/
 │   │   ├── types.ts                   # Schema, field defs, InferSettingsValues, schema.Type
-│   │   ├── fields.ts                  # field.{boolean,enum,multiSelect,string,number,integer,custom}
+│   │   ├── fields.ts                  # field.{boolean,enum,multiSelect,string,number,integer,model,custom}
 │   │   ├── validate.ts                # Field validation, SECRET_KEY_PATTERN, stripControlChars, deepEqual
 │   │   ├── define.ts                  # defineSettings(), resolveEffective, computeProvenance, diffForScope
 │   │   └── index.ts
@@ -61,7 +61,8 @@ pi-extension-settings-tui/
 │   │   │   ├── confirm-route.ts
 │   │   │   ├── text-input-route.ts    # Input (single-line) & Editor (multiline, Ctrl+S)
 │   │   │   ├── select-route.ts        # Input + fuzzyFilter searchable picker
-│   │   │   └── multi-select-route.ts  # Searchable checklist + collapsible groups
+│   │   │   ├── multi-select-route.ts  # Searchable checklist + collapsible groups
+│   │   │   └── model-picker-route.ts  # Two-step Pi model (Scoped/All + fuzzy) -> thinking level picker
 │   │   └── index.ts
 │   └── adapter/
 │       ├── types.ts                   # OpenSettingsDialogOptions/Result
@@ -120,7 +121,7 @@ pi-extension-settings-tui/
 - Project scope is strictly gated on `trustedProject` (defaulting to `ctx.isProjectTrusted()`).
 
 ### Explicit non-goals
-- Do **not** add domain-specific pickers (LLM model registries, auth credential lookups, MCP server discovery) to this library — host extensions supply those via `field.custom`.
+- Do **not** add auth credential lookups, MCP server discovery, or arbitrary extension-specific domain pickers beyond Pi's universal `field.model` widget — host extensions supply domain-specific pickers via `field.custom`.
 - Do **not** store secrets/credentials.
 - Do **not** grow this into a generic TUI layout framework.
 

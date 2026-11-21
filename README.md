@@ -7,7 +7,7 @@
 A declarative settings dialog and layered JSON persistence library for [Pi](https://github.com/earendil-works/pi-coding-agent) extensions, built on `@earendil-works/pi-tui`. Define your schema once to get a themed TUI overlay, fullscreen mouse support, hardened Global/Project overrides, and automatic RPC/headless fallback.
 
 - **Declarative schema + strict TS inference** — `defineSettings` and `field.*` builders infer exact literal union types via `typeof schema.Type`.
-- **Single-overlay TUI + fullscreen mouse** — tabs, searchable pickers, collapsible multi-select checklists, inline editors, and custom sub-routes with native SGR mouse clicks and wheel scrolling.
+- **Single-overlay TUI + fullscreen mouse** — tabs, searchable pickers, collapsible multi-select checklists, first-class Pi model + thinking level picker (Scoped/All + fuzzy search), inline editors, and custom sub-routes with native SGR mouse clicks and wheel scrolling.
 - **Global & Project layered overrides** — stores only diffs from defaults, shows provenance dots (`●`), and supports custom file names, path resolvers, or Pi session storage.
 - **Hardened atomic I/O** — `0o600` temp-file writes with `fsync`, symlink refusal, 64 KiB cap, secret-key rejection, and optimistic concurrency checks.
 - **Automatic RPC & headless fallback** — builds a `ctx.ui.select`/`input` menu in RPC mode and returns resolved settings cleanly in `print`/`json` mode.
@@ -82,7 +82,7 @@ With `settingsFile: "my-extension.json"`, settings automatically mirror to `~/.p
 | Guide | Covers |
 | :--- | :--- |
 | [Getting Started](docs/getting-started.md) | Full walkthrough, reading settings at startup, trying the demo extension |
-| [Field Types & Custom Sub-Routes](docs/field-types.md) | `boolean`, `enum`, `multiSelect`, `string`, `number`, `integer`, `custom` |
+| [Field Types & Custom Sub-Routes](docs/field-types.md) | `boolean`, `enum`, `multiSelect`, `string`, `number`, `integer`, `model`, `custom` |
 | [Storage, Scopes & Security](docs/storage-and-security.md) | Custom file names/paths, Global vs Project layers, session storage, hardening |
 | [TUI, Fullscreen Mouse & RPC Fallback](docs/tui-mouse-and-rpc.md) | Keyboard/mouse controls, subpath exports, non-TUI fallback |
 | [Demo Extension](examples/demo-extension/index.ts) | Runnable Pi extension showcasing every field type |

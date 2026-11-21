@@ -1,13 +1,111 @@
-import type {
-  AnyFieldDef,
-  FieldMap,
-  InferSettingsValues,
-  PartialValidationResult,
-  ValidationResult,
-  ValidationWarning,
+import {
+  MODEL_THINKING_LEVELS,
+  type AnyFieldDef,
+  type FieldMap,
+  type InferSettingsValues,
+  type ModelPickerEntry,
+  type ModelThinkingLevel,
+  type PartialValidationResult,
+  type ValidationResult,
+  type ValidationWarning,
 } from "./types.js";
 
 export const SECRET_KEY_PATTERN = /api.?key|token|secret|password|authorization|credential/i;
+
+const MODEL_IDENTITY_RE = /^[^\s/]+\/[^\s]+$/;
+
+const MODEL_THINKING_LEVEL_SET: ReadonlySet<string> = new Set(MODEL_THINKING_LEVELS);
+
+/** Human-readable descriptions for each Pi thinking level. */
+export const MODEL_THINKING_LEVEL_DESCRIPTIONS: Readonly<Record<ModelThinkingLevel, string>> = {
+  off: "No reasoning",
+  minimal: "Very brief reasoning (~1k tokens)",
+  low: "Light reasoning (~2k tokens)",
+  medium: "Moderate reasoning (~8k tokens)",
+  high: "Deep reasoning (~16k tokens)",
+  xhigh: "Extra-high reasoning (~32k tokens)",
+  max: "Maximum reasoning",
+};
+
+/** Checks whether a value is a valid Pi thinking level string. */
+export function isValidModelThinkingLevel(value: unknown): value is ModelThinkingLevel {
+  return typeof value === "string" && MODEL_THINKING_LEVEL_SET.has(value);
+}
+
+/** Formats `{ provider, id }` into a canonical `provider/model-id` identity string. */
+export function formatModelIdentity(model: Pick<ModelPickerEntry, "provider" | "id">): string {
+  return `${model.provider}/${model.id}`;
+}
+
+/**
+ * Parses a `provider/model-id` identity string into `{ provider, id }`.
+ * Splits on the first `/` so model IDs containing slashes (e.g. OpenRouter) stay intact.
+ * Returns `null` when the string is not a valid `provider/model-id`.
+ */
+export function parseModelIdentity(identity: string): { readonly provider: string; readonly id: string } | null {
+  if (typeof identity !== "string" || !MODEL_IDENTITY_RE.test(identity)) {
+    return null;
+  }
+  const slashIndex = identity.indexOf("/");
+  if (slashIndex <= 0 || slashIndex >= identity.length - 1) {
+    return null;
+  }
+  return {
+    provider: identity.slice(0, slashIndex),
+    id: identity.slice(slashIndex + 1),
+  };
+}
+
+/**
+ * Computes the supported thinking levels for a model using Pi's capability rules:
+ * - `model.reasoning === false` -> `["off"]`
+ * - `model.reasoning === true` -> standard levels filtered by `thinkingLevelMap`
+ *   (`null` excludes a level; `"xhigh"` and `"max"` require an explicit non-null map entry)
+ * - `model` omitted or `model.reasoning === undefined` -> all levels (filtered by `thinkingLevelMap` if set)
+ *
+ * When `allowedLevels` is provided, intersects with the model's supported levels
+ * (falling back to the model's supported levels if the intersection is empty).
+ */
+export function getSupportedThinkingLevelsForModel(
+  model?: Pick<ModelPickerEntry, "reasoning" | "thinkingLevelMap">,
+  allowedLevels?: readonly ModelThinkingLevel[],
+): ModelThinkingLevel[] {
+  let supported: ModelThinkingLevel[];
+
+  if (model?.reasoning === false) {
+    supported = ["off"];
+  } else if (model?.reasoning === true) {
+    supported = MODEL_THINKING_LEVELS.filter((level) => {
+      const mapped = model.thinkingLevelMap?.[level];
+      if (mapped === null) {
+        return false;
+      }
+      if (level === "xhigh" || level === "max") {
+        return mapped !== undefined;
+      }
+      return true;
+    });
+  } else {
+    supported = MODEL_THINKING_LEVELS.filter((level) => {
+      const mapped = model?.thinkingLevelMap?.[level];
+      return mapped !== null;
+    });
+  }
+
+  if (supported.length === 0) {
+    supported = ["off"];
+  }
+
+  if (allowedLevels && allowedLevels.length > 0) {
+    const supportedSet = new Set<ModelThinkingLevel>(supported);
+    const filtered = allowedLevels.filter((level) => supportedSet.has(level));
+    if (filtered.length > 0) {
+      return [...new Set(filtered)];
+    }
+  }
+
+  return supported;
+}
 
 // Matches OSC, DCS/SOS/PM/APC, CSI (7-bit & 8-bit), and 2-byte ESC sequences.
 const ANSI_ESCAPE_SEQUENCE_RE =
@@ -282,6 +380,54 @@ export function validateFieldValue(fieldDef: AnyFieldDef, raw: unknown): Validat
       }
 
       return { ok: true, value: deduped };
+    }
+
+    case "model": {
+      if (raw === null) {
+        if (fieldDef.allowClear) {
+          return { ok: true, value: null };
+        }
+        return { ok: false, error: "A model selection is required" };
+      }
+
+      if (!isPlainObject(raw)) {
+        return {
+          ok: false,
+          error: "Expected a model selection object with model and thinkingLevel",
+        };
+      }
+
+      if (typeof raw.model !== "string") {
+        return { ok: false, error: 'Model must be a "provider/model-id" string' };
+      }
+
+      const normalizedModel = stripControlChars(raw.model, false).trim();
+      if (!parseModelIdentity(normalizedModel)) {
+        return {
+          ok: false,
+          error: `Invalid model "${normalizedModel}". Expected "provider/model-id" format`,
+        };
+      }
+
+      const allowedThinking =
+        fieldDef.thinkingLevels && fieldDef.thinkingLevels.length > 0
+          ? fieldDef.thinkingLevels
+          : MODEL_THINKING_LEVELS;
+
+      if (!isValidModelThinkingLevel(raw.thinkingLevel) || !allowedThinking.includes(raw.thinkingLevel)) {
+        return {
+          ok: false,
+          error: `Invalid thinking level "${String(raw.thinkingLevel)}". Allowed: ${allowedThinking.join(", ")}`,
+        };
+      }
+
+      return {
+        ok: true,
+        value: {
+          model: normalizedModel,
+          thinkingLevel: raw.thinkingLevel,
+        },
+      };
     }
 
     case "custom": {

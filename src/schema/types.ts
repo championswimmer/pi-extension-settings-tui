@@ -3,6 +3,49 @@ export type FieldProvenance = "default" | "global" | "project" | "both";
 export type SaveMode = "draft" | "immediate";
 export type ValueTone = "default" | "accent" | "warn" | "error" | "success" | "muted";
 
+export const MODEL_THINKING_LEVELS = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+
+export type ModelThinkingLevel = (typeof MODEL_THINKING_LEVELS)[number];
+
+export type ModelPickerScope = "scoped" | "all";
+
+/**
+ * Persisted value for a `field.model` setting: both the chosen model identity
+ * (`provider/model-id`) and its thinking level.
+ */
+export interface ModelSelection {
+  readonly model: string;
+  readonly thinkingLevel: ModelThinkingLevel;
+}
+
+/**
+ * Structural model descriptor compatible with Pi's `Model<Api>` without
+ * introducing any Pi runtime or type dependency in `./schema`.
+ */
+export interface ModelPickerEntry {
+  readonly provider: string;
+  readonly id: string;
+  readonly name?: string;
+  readonly reasoning?: boolean;
+  readonly thinkingLevelMap?: Partial<Record<ModelThinkingLevel, unknown | null>>;
+}
+
+/**
+ * Structural scoped-model entry compatible with Pi's `ScopedModel`.
+ */
+export interface ScopedModelEntry {
+  readonly model: ModelPickerEntry;
+  readonly thinkingLevel?: ModelThinkingLevel;
+}
+
 export interface TabDefinition {
   readonly id: string;
   readonly label: string;
@@ -90,6 +133,34 @@ export interface NumberFieldDef<TValues extends Record<string, unknown> = Record
   readonly unit?: string;
 }
 
+export interface ModelFieldDef<
+  TAllowClear extends boolean = boolean,
+  TValues extends Record<string, unknown> = Record<string, unknown>,
+> extends FieldBase<TAllowClear extends true ? ModelSelection | null : ModelSelection, TValues> {
+  readonly kind: "model";
+  /** Allow clearing the setting to `null` (e.g., inherit active model or disable). */
+  readonly allowClear?: TAllowClear;
+  /** Label shown when value is `null` and for the clear row in the picker. */
+  readonly emptyLabel?: string;
+  /** Description shown on the clear row in the picker when `allowClear` is true. */
+  readonly emptyDescription?: string;
+  /**
+   * Initial model filter scope in the picker:
+   * - `"auto"` (default): starts on `"scoped"` when scoped models exist, else `"all"`.
+   * - `"scoped"`: always starts on `"scoped"`.
+   * - `"all"`: always starts on `"all"`.
+   */
+  readonly defaultModelScope?: ModelPickerScope | "auto";
+  /** Optional allowlist restricting selectable thinking levels. */
+  readonly thinkingLevels?: readonly ModelThinkingLevel[];
+  /** Preferred thinking level preselected in Step 2 when picking a new model. */
+  readonly defaultThinkingLevel?: ModelThinkingLevel;
+  /** Optional override/source for available models (defaults to Pi's `ctx.modelRegistry.getAvailable()`). */
+  readonly models?: readonly ModelPickerEntry[] | ((context?: unknown) => readonly ModelPickerEntry[]);
+  /** Optional override/source for scoped models (defaults to Pi's `ctx.scopedModels`). */
+  readonly scopedModels?: readonly ScopedModelEntry[] | ((context?: unknown) => readonly ScopedModelEntry[]);
+}
+
 export interface CustomSubrouteParams<
   T = unknown,
   TValues extends Record<string, unknown> = Record<string, unknown>,
@@ -123,6 +194,7 @@ export type AnyFieldDef =
   | MultiSelectFieldDef<any, any>
   | StringFieldDef<any>
   | NumberFieldDef<any>
+  | ModelFieldDef<any, any>
   | CustomFieldDef<any, any>;
 
 export type FieldMap = Record<string, AnyFieldDef>;
@@ -134,6 +206,8 @@ export type InferFieldValue<F> =
   F extends MultiSelectFieldDef<infer T, any> ? T[] :
   F extends StringFieldDef<any> ? string :
   F extends NumberFieldDef<any> ? number :
+  F extends ModelFieldDef<infer TAllowClear, any>
+    ? (true extends TAllowClear ? ModelSelection | null : ModelSelection) :
   F extends CustomFieldDef<infer T, any> ? T :
   never;
 

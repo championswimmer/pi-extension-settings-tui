@@ -4,7 +4,9 @@ import type {
   FieldMap,
   FieldProvenance,
   InferSettingsValues,
+  ModelPickerEntry,
   SaveMode,
+  ScopedModelEntry,
   SettingsSchema,
   SettingsScope,
 } from "../schema/index.js";
@@ -74,6 +76,10 @@ export interface SettingsDialogOptions<TFields extends FieldMap> {
   readonly initialField?: string;
   readonly saveMode?: SaveMode;
   readonly preferredWidth?: number;
+  /** Available models supplied to `field.model` pickers (populated automatically by `openSettingsDialog`). */
+  readonly availableModels?: readonly ModelPickerEntry[] | (() => readonly ModelPickerEntry[]);
+  /** Scoped models supplied to `field.model` pickers (populated automatically by `openSettingsDialog`). */
+  readonly scopedModels?: readonly ScopedModelEntry[] | (() => readonly ScopedModelEntry[]);
   readonly onApply?: (
     next: InferSettingsValues<TFields>,
     meta: {

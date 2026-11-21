@@ -71,6 +71,23 @@ function formatDefaultFieldValue(def: AnyFieldDef, value: unknown): string {
       return `"${truncateDisplay(singleLine, MAX_FORMAT_STRING_LEN - 2)}"`;
     }
 
+    case "model": {
+      if (value === null || value === undefined) {
+        return def.emptyLabel ?? "None";
+      }
+      if (
+        typeof value === "object" &&
+        "model" in value &&
+        typeof (value as { model: unknown }).model === "string" &&
+        "thinkingLevel" in value &&
+        typeof (value as { thinkingLevel: unknown }).thinkingLevel === "string"
+      ) {
+        const sel = value as { model: string; thinkingLevel: string };
+        return `${sel.model} (${sel.thinkingLevel})`;
+      }
+      return String(value);
+    }
+
     case "custom": {
       if (value === null || value === undefined) {
         return "(empty)";
@@ -108,6 +125,9 @@ function getDefaultFieldTone(def: AnyFieldDef, value: unknown): ValueTone {
 
     case "string":
       return typeof value === "string" && value.length === 0 ? "muted" : "default";
+
+    case "model":
+      return value === null || value === undefined ? "muted" : "accent";
 
     case "number":
     case "custom":

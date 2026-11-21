@@ -1,12 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  MODEL_THINKING_LEVELS,
   SECRET_KEY_PATTERN,
   cloneValue,
   deepEqual,
   defineSettings,
   field,
   findSecretKeys,
+  formatModelIdentity,
+  getSupportedThinkingLevelsForModel,
+  parseModelIdentity,
   stripControlChars,
   validateFieldValue,
   validatePartialSettings,
@@ -631,4 +635,162 @@ test("defineSettings resolves settingsFile from top-level config or storage.sett
   });
   assert.equal(topWins.settingsFile, "preferred.json");
   assert.equal(topWins.storage.settingsFile, "preferred.json");
+});
+
+test("model field helpers, validation, formatting, tone, and layered diffing", () => {
+  assert.deepEqual(MODEL_THINKING_LEVELS, [
+    "off",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+  ]);
+
+  assert.equal(formatModelIdentity({ provider: "anthropic", id: "claude-sonnet-4-5" }), "anthropic/claude-sonnet-4-5");
+  assert.deepEqual(parseModelIdentity("anthropic/claude-sonnet-4-5"), {
+    provider: "anthropic",
+    id: "claude-sonnet-4-5",
+  });
+  // OpenRouter-style nested slashes & colon suffixes
+  assert.deepEqual(parseModelIdentity("openrouter/qwen/qwen3-coder:exacto"), {
+    provider: "openrouter",
+    id: "qwen/qwen3-coder:exacto",
+  });
+  for (const invalid of ["", "no-slash", "/leading", "trailing/", "has space/id", "p/has space"]) {
+    assert.equal(parseModelIdentity(invalid), null);
+  }
+
+  // Supported thinking levels matching Pi rules
+  assert.deepEqual(getSupportedThinkingLevelsForModel({ reasoning: false }), ["off"]);
+  assert.deepEqual(getSupportedThinkingLevelsForModel({ reasoning: true }), [
+    "off",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+  ]);
+  assert.deepEqual(
+    getSupportedThinkingLevelsForModel({
+      reasoning: true,
+      thinkingLevelMap: { minimal: null, xhigh: "xhigh", max: "max" },
+    }),
+    ["off", "low", "medium", "high", "xhigh", "max"],
+  );
+  assert.deepEqual(
+    getSupportedThinkingLevelsForModel({ reasoning: true }, ["low", "high"]),
+    ["low", "high"],
+  );
+  assert.deepEqual(getSupportedThinkingLevelsForModel(undefined), [
+    "off",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+  ]);
+
+  const requiredModel = field.model({
+    label: "Summary model",
+    default: { model: "anthropic/claude-haiku-4-5", thinkingLevel: "low" },
+    thinkingLevels: ["off", "low", "medium", "high"],
+  });
+  assert.equal(requiredModel.allowClear, false);
+  assert.deepEqual(
+    validateFieldValue(requiredModel, {
+      model: "  \x1b[32mopenai/gpt-5-mini\x1b[0m  ",
+      thinkingLevel: "medium",
+      extraIgnored: true,
+    }),
+    { ok: true, value: { model: "openai/gpt-5-mini", thinkingLevel: "medium" } },
+  );
+  assert.equal(validateFieldValue(requiredModel, null).ok, false);
+  assert.equal(validateFieldValue(requiredModel, "openai/gpt-5-mini").ok, false);
+  assert.equal(
+    validateFieldValue(requiredModel, { model: "missing-provider", thinkingLevel: "low" }).ok,
+    false,
+  );
+  assert.equal(
+    validateFieldValue(requiredModel, { model: "openai/gpt-5-mini", thinkingLevel: "xhigh" }).ok,
+    false,
+  );
+
+  const nullableModel = field.model({
+    label: "Housekeeping model",
+    default: null,
+    emptyLabel: "Disabled",
+  });
+  assert.equal(nullableModel.allowClear, true);
+  assert.deepEqual(validateFieldValue(nullableModel, null), { ok: true, value: null });
+  assert.deepEqual(
+    validateFieldValue(nullableModel, {
+      model: "openrouter/anthropic/claude-3.5-sonnet",
+      thinkingLevel: "high",
+    }),
+    {
+      ok: true,
+      value: { model: "openrouter/anthropic/claude-3.5-sonnet", thinkingLevel: "high" },
+    },
+  );
+
+  const schema = defineSettings({
+    id: "model-schema",
+    title: "Model Schema",
+    fields: {
+      summaryModel: requiredModel,
+      housekeepingModel: nullableModel,
+    },
+  });
+
+  assert.equal(
+    schema.formatFieldValue("summaryModel", {
+      model: "anthropic/claude-haiku-4-5",
+      thinkingLevel: "low",
+    }),
+    "anthropic/claude-haiku-4-5 (low)",
+  );
+  assert.equal(
+    schema.getFieldTone("summaryModel", {
+      model: "anthropic/claude-haiku-4-5",
+      thinkingLevel: "low",
+    }),
+    "accent",
+  );
+  assert.equal(schema.formatFieldValue("housekeepingModel", null), "Disabled");
+  assert.equal(schema.getFieldTone("housekeepingModel", null), "muted");
+
+  // Layered resolution & diffing (changing only thinkingLevel must be persisted!)
+  const layers = {
+    global: {
+      summaryModel: { model: "anthropic/claude-haiku-4-5", thinkingLevel: "medium" },
+    },
+    project: {},
+  };
+  assert.deepEqual(
+    schema.diffForScope(
+      {
+        summaryModel: { model: "anthropic/claude-haiku-4-5", thinkingLevel: "low" },
+        housekeepingModel: null,
+      },
+      "global",
+      { global: {}, project: {} },
+    ),
+    {},
+  );
+  assert.deepEqual(
+    schema.diffForScope(
+      {
+        summaryModel: { model: "anthropic/claude-haiku-4-5", thinkingLevel: "high" },
+        housekeepingModel: { model: "openai/gpt-5-mini", thinkingLevel: "off" },
+      },
+      "project",
+      layers,
+    ),
+    {
+      summaryModel: { model: "anthropic/claude-haiku-4-5", thinkingLevel: "high" },
+      housekeepingModel: { model: "openai/gpt-5-mini", thinkingLevel: "off" },
+    },
+  );
 });

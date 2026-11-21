@@ -173,6 +173,14 @@ export const demoSchema = defineSettings({
         { value: "ap-south", label: "AP South", description: "Mumbai (bom)" },
       ],
     }),
+    summaryModel: field.model({
+      tab: "general",
+      label: "Summary model",
+      description: "Pick a Pi model (Scoped/All + fuzzy search) and its thinking level.",
+      default: null,
+      emptyLabel: "Active model (default)",
+      emptyDescription: "Use the currently active Pi session model",
+    }),
     tags: field.multiSelect({
       tab: "filters",
       label: "Active tags",

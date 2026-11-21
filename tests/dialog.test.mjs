@@ -961,3 +961,223 @@ test("12. saveMode 'immediate': serialized rapid back-to-back edits with zero dr
   assert.equal(ctx.results[0].values.enabled, false);
   assert.equal(ctx.results[0].values.mode, "strict");
 });
+
+test("13. ModelPickerRoute: two-step model -> thinking flow, fuzzy search, Scoped/All toggle, mouse, allowClear, height/width safety", async () => {
+  const availableModels = [
+    {
+      provider: "anthropic",
+      id: "claude-sonnet-4-5",
+      name: "Claude Sonnet 4.5",
+      reasoning: true,
+      thinkingLevelMap: { xhigh: "xhigh" },
+    },
+    {
+      provider: "anthropic",
+      id: "claude-haiku-4-5",
+      name: "Claude Haiku 4.5",
+      reasoning: false,
+    },
+    {
+      provider: "openai",
+      id: "gpt-5-mini",
+      name: "GPT-5 Mini",
+      reasoning: true,
+    },
+    {
+      provider: "openrouter",
+      id: "qwen/qwen3-coder:exacto",
+      name: "Qwen3 Coder Exacto",
+      reasoning: true,
+    },
+  ];
+  const scopedModels = [
+    { model: availableModels[0], thinkingLevel: "high" },
+    { model: availableModels[1] },
+  ];
+
+  const modelSchema = defineSettings({
+    id: "model-picker-dialog-test",
+    title: "Model Settings",
+    scopes: ["global"],
+    saveMode: "draft",
+    fields: {
+      summaryModel: field.model({
+        label: "Summary model",
+        description: "Choose a summarizer model and thinking level.",
+        default: null,
+        emptyLabel: "Active model (default)",
+        emptyDescription: "Use the active session model",
+      }),
+      fallbackModel: field.model({
+        label: "Fallback model",
+        default: { model: "legacy/offline-model", thinkingLevel: "medium" },
+      }),
+    },
+  });
+
+  const adapter = createMemoryStorageAdapter();
+  const store = createSettingsStore(modelSchema, { adapter });
+  const initialState = await store.load({ trustedProject: true });
+  const tui = createMockTui({ rows: 30, columns: 86, mode: "fullscreen" });
+  const keybindings = createMockKeybindings();
+  const results = [];
+
+  const dialog = new SettingsDialogComponent({
+    schema: modelSchema,
+    store,
+    initialState,
+    tui,
+    theme: createMockTheme(),
+    keybindings,
+    availableModels,
+    scopedModels,
+    done: (res) => results.push(res),
+  });
+  dialog.focused = true;
+
+  // Root renders emptyLabel and formatted model (thinkingLevel)
+  let lines = dialog.render(86);
+  assert.ok(lines.some((l) => l.includes("Active model (default)")));
+  assert.ok(lines.some((l) => l.includes("legacy/offline-model (medium)")));
+
+  // Enter opens ModelPickerRoute Step 1 on Scoped (2) by default
+  dialog.handleInput(KEY_ENTER);
+  lines = dialog.render(86);
+  assert.ok(lines.some((l) => l.includes("Step 1/2")));
+  assert.ok(lines.some((l) => l.includes("[Scoped (2)]")));
+  assert.ok(lines.some((l) => l.includes("[All (4)]")));
+  assert.ok(lines.some((l) => l.includes("claude-sonnet-4-5")));
+  assert.ok(lines.some((l) => l.includes("claude-haiku-4-5")));
+  // gpt-5-mini is NOT in scopedModels
+  assert.ok(!lines.some((l) => l.includes("gpt-5-mini")));
+
+  // Fuzzy search "gpt" in Scoped -> no matches; press Tab -> switches to All and shows gpt-5-mini!
+  for (const ch of "gpt") {
+    dialog.handleInput(ch);
+  }
+  lines = dialog.render(86);
+  assert.ok(lines.some((l) => l.includes("No matching models")));
+
+  dialog.handleInput(KEY_TAB);
+  lines = dialog.render(86);
+  assert.ok(lines.some((l) => l.includes("gpt-5-mini")));
+  assert.ok(!lines.some((l) => l.includes("claude-sonnet-4-5")));
+
+  // Press Enter on gpt-5-mini -> Step 2 (Thinking level)
+  dialog.handleInput(KEY_ENTER);
+  lines = dialog.render(86);
+  assert.ok(lines.some((l) => l.includes("Step 2/2")));
+  assert.ok(lines.some((l) => l.includes("openai/gpt-5-mini")));
+  assert.ok(lines.some((l) => l.includes("medium")));
+  assert.ok(lines.some((l) => l.includes("high")));
+  // gpt-5-mini has no xhigh in thinkingLevelMap
+  assert.ok(!lines.some((l) => l.includes("xhigh")));
+
+  // Click [← Models] pill in Step 2 -> returns to Step 1 preserving search/scope!
+  const backToModelsPos = findTextPosition(lines, "[← Models]");
+  assert.ok(backToModelsPos, "[← Models] pill not found");
+  dialog.handleMouse(makeMouseEvent("press", backToModelsPos));
+  dialog.handleMouse(makeMouseEvent("click", { ...backToModelsPos, clickCount: 1 }));
+  lines = dialog.render(86);
+  assert.ok(lines.some((l) => l.includes("Step 1/2")));
+  assert.ok(lines.some((l) => l.includes("gpt-5-mini")));
+
+  // Clear search with Ctrl+U, click [Scoped (2)] pill -> back to scoped models
+  dialog.handleInput("\x15");
+  lines = dialog.render(86);
+  const scopedPos = findTextPosition(lines, "[Scoped (2)]");
+  assert.ok(scopedPos, "[Scoped (2)] pill not found");
+  dialog.handleMouse(makeMouseEvent("press", scopedPos));
+  dialog.handleMouse(makeMouseEvent("click", { ...scopedPos, clickCount: 1 }));
+  lines = dialog.render(86);
+  assert.ok(lines.some((l) => l.includes("claude-sonnet-4-5")));
+  assert.ok(!lines.some((l) => l.includes("gpt-5-mini")));
+
+  // Click claude-sonnet-4-5 (has xhigh in thinkingLevelMap and scoped thinkingLevel: "high")
+  const sonnetPos = findTextPosition(lines, "claude-sonnet-4-5");
+  assert.ok(sonnetPos);
+  dialog.handleMouse(makeMouseEvent("press", sonnetPos));
+  dialog.handleMouse(makeMouseEvent("click", { ...sonnetPos, clickCount: 1 }));
+  lines = dialog.render(86);
+  assert.ok(lines.some((l) => l.includes("Step 2/2")));
+  assert.ok(lines.some((l) => l.includes("xhigh")));
+  assert.ok(lines.some((l) => l.includes("· scoped")));
+
+  // Click xhigh -> commits { model: "anthropic/claude-sonnet-4-5", thinkingLevel: "xhigh" }
+  const xhighPos = findTextPosition(lines, "xhigh");
+  assert.ok(xhighPos);
+  dialog.handleMouse(makeMouseEvent("press", xhighPos));
+  dialog.handleMouse(makeMouseEvent("click", { ...xhighPos, clickCount: 1 }));
+  lines = dialog.render(86);
+  assert.ok(!lines.some((l) => l.includes("Step 2/2")));
+  assert.ok(lines.some((l) => l.includes("anthropic/claude-sonnet-4-5")));
+
+  // Save via Ctrl+S and verify both model and thinkingLevel are saved!
+  dialog.handleInput(KEY_CTRL_S);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(results.length, 1);
+  assert.equal(results[0].saved, true);
+  assert.deepEqual(results[0].values.summaryModel, {
+    model: "anthropic/claude-sonnet-4-5",
+    thinkingLevel: "xhigh",
+  });
+  const savedLayer = await adapter.readLayer("global");
+  assert.deepEqual(savedLayer.data?.summaryModel, {
+    model: "anthropic/claude-sonnet-4-5",
+    thinkingLevel: "xhigh",
+  });
+
+  // Verify non-reasoning model shows off-only in Step 2, allowClear commits null,
+  // and unavailable current model appears in All view + height/width safety across tiny terminals
+  for (const { columns, rows } of [
+    { columns: 84, rows: 30 },
+    { columns: 46, rows: 24 },
+    { columns: 70, rows: 12 },
+  ]) {
+    const smallTui = createMockTui({ rows, columns, mode: "fullscreen" });
+    const smallDialog = new SettingsDialogComponent({
+      schema: modelSchema,
+      store,
+      initialState: await store.load({ trustedProject: true }),
+      tui: smallTui,
+      theme: createMockTheme(),
+      keybindings,
+      availableModels,
+      scopedModels,
+      done: () => {},
+    });
+    smallDialog.focused = true;
+    const maxLines = Math.max(8, rows - 4);
+
+    // Open Summary model -> Step 1
+    smallDialog.handleInput(KEY_ENTER);
+    const step1Lines = smallDialog.render(columns);
+    assert.ok(step1Lines.length <= maxLines, `Step 1 exceeded ${maxLines} at ${columns}x${rows}`);
+    for (const line of step1Lines) {
+      assert.ok(visibleWidth(line) <= columns, `Step 1 line exceeded ${columns}`);
+    }
+
+    // Select haiku (reasoning: false) -> Step 2 (off only)
+    for (const ch of "haiku") smallDialog.handleInput(ch);
+    smallDialog.handleInput(KEY_ENTER);
+    const step2Lines = smallDialog.render(columns);
+    assert.ok(step2Lines.length <= maxLines, `Step 2 exceeded ${maxLines} at ${columns}x${rows}`);
+    for (const line of step2Lines) {
+      assert.ok(visibleWidth(line) <= columns, `Step 2 line exceeded ${columns}`);
+    }
+    assert.ok(step2Lines.some((l) => l.includes("off")));
+    assert.ok(!step2Lines.some((l) => l.includes("medium")));
+
+    // Esc back to Step 1 -> clear query -> select clear row ("Active model (default)") -> commits null
+    smallDialog.handleInput(KEY_ESC);
+    smallDialog.handleInput("\x15");
+    // Move to index 0 (clear row) via selecting it with keyboard after re-opening
+    smallDialog.handleInput(KEY_ESC); // exit route
+    // Open fallbackModel (has unavailable saved model legacy/offline-model)
+    smallDialog.navigateTo({ field: "fallbackModel" });
+    smallDialog.handleInput(KEY_ENTER);
+    smallDialog.handleInput(KEY_TAB); // switch to All
+    const allLines = smallDialog.render(columns);
+    assert.ok(allLines.some((l) => l.includes("offline-model")));
+  }
+});

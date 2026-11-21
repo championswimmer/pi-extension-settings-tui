@@ -20,6 +20,8 @@ import {
   type FieldMap,
   type FieldProvenance,
   type InferSettingsValues,
+  type ModelFieldDef,
+  type ModelSelection,
   type MultiSelectFieldDef,
   type NumberFieldDef,
   type SaveMode,
@@ -44,6 +46,7 @@ import {
 } from "./frame.js";
 import { HitRegionTracker, renderPillRow, type PillItem } from "./hit-test.js";
 import { ConfirmRoute } from "./routes/confirm-route.js";
+import { ModelPickerRoute } from "./routes/model-picker-route.js";
 import { MultiSelectRoute } from "./routes/multi-select-route.js";
 import { SelectRoute } from "./routes/select-route.js";
 import { TextInputRoute } from "./routes/text-input-route.js";
@@ -1200,6 +1203,9 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       case "number":
         this.openNumberRoute(key, def, Number(currentValue));
         break;
+      case "model":
+        this.openModelRoute(key, def, (currentValue as ModelSelection | null) ?? null);
+        break;
       case "custom":
         this.openCustomRoute(key, def, currentValue);
         break;
@@ -1339,6 +1345,61 @@ export class SettingsDialogComponent<TFields extends FieldMap>
         const parsed = Number(next.trim());
         const checked = this.options.schema.validateField(key, parsed);
         if (!checked.ok) return;
+        this.popRoute();
+        this.commitFieldValue(key, checked.value);
+      },
+      onCancel: () => {
+        this.popRoute();
+      },
+    });
+    this.pushRoute(def.label, route);
+  }
+
+  private openModelRoute(
+    key: keyof TFields & string,
+    def: ModelFieldDef<boolean, Record<string, unknown>>,
+    currentValue: ModelSelection | null,
+  ): void {
+    const resolvedAvailable =
+      def.models !== undefined
+        ? typeof def.models === "function"
+          ? def.models()
+          : def.models
+        : typeof this.options.availableModels === "function"
+          ? this.options.availableModels()
+          : (this.options.availableModels ?? []);
+
+    const resolvedScoped =
+      def.scopedModels !== undefined
+        ? typeof def.scopedModels === "function"
+          ? def.scopedModels()
+          : def.scopedModels
+        : typeof this.options.scopedModels === "function"
+          ? this.options.scopedModels()
+          : (this.options.scopedModels ?? []);
+
+    const route = new ModelPickerRoute({
+      title: def.label,
+      description: def.description,
+      availableModels: resolvedAvailable,
+      scopedModels: resolvedScoped,
+      currentValue: currentValue ? cloneValue(currentValue) : null,
+      allowClear: def.allowClear,
+      emptyLabel: def.emptyLabel,
+      emptyDescription: def.emptyDescription,
+      defaultScope: def.defaultModelScope,
+      thinkingLevels: def.thinkingLevels,
+      defaultThinkingLevel: def.defaultThinkingLevel,
+      theme: this.options.theme,
+      keybindings: this.options.keybindings,
+      getMaxHeight: () => this.lastSubrouteBodyBudget,
+      onSelect: (next) => {
+        const checked = this.options.schema.validateField(key, next);
+        if (!checked.ok) {
+          this.statusBanner = { text: checked.error, tone: "error" };
+          this.popRoute();
+          return;
+        }
         this.popRoute();
         this.commitFieldValue(key, checked.value);
       },

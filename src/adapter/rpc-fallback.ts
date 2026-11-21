@@ -1,7 +1,13 @@
 import type { ExtensionContext, ExtensionUIDialogOptions } from "@earendil-works/pi-coding-agent";
+import { fuzzyFilter } from "@earendil-works/pi-tui";
 import {
   cloneValue,
   deepEqual,
+  formatModelIdentity,
+  getSupportedThinkingLevelsForModel,
+  MODEL_THINKING_LEVEL_DESCRIPTIONS,
+  parseModelIdentity,
+  stripControlChars,
   type AnyFieldDef,
   type BooleanFieldDef,
   type CustomFieldDef,
@@ -9,6 +15,11 @@ import {
   type FieldMap,
   type FieldProvenance,
   type InferSettingsValues,
+  type ModelFieldDef,
+  type ModelPickerEntry,
+  type ModelPickerScope,
+  type ModelSelection,
+  type ModelThinkingLevel,
   type MultiSelectFieldDef,
   type NumberFieldDef,
   type SettingsSchema,
@@ -342,6 +353,275 @@ async function editNumberField<TFields extends FieldMap>(
   return undefined;
 }
 
+async function editModelField<TFields extends FieldMap>(
+  ctx: ExtensionContext,
+  schema: SettingsSchema<TFields>,
+  key: keyof TFields & string,
+  def: ModelFieldDef<boolean, any>,
+  currentValue: ModelSelection | null,
+  dialogOpts: ExtensionUIDialogOptions | undefined,
+  catalogOptions?: Pick<OpenSettingsDialogOptions<TFields>, "availableModels" | "scopedModels">,
+): Promise<ModelSelection | null | undefined> {
+  const rawAvailable =
+    def.models !== undefined
+      ? typeof def.models === "function"
+        ? def.models()
+        : def.models
+      : catalogOptions?.availableModels !== undefined
+        ? typeof catalogOptions.availableModels === "function"
+          ? catalogOptions.availableModels()
+          : catalogOptions.availableModels
+        : typeof ctx.modelRegistry?.getAvailable === "function"
+          ? ctx.modelRegistry.getAvailable()
+          : [];
+
+  const rawScoped =
+    def.scopedModels !== undefined
+      ? typeof def.scopedModels === "function"
+        ? def.scopedModels()
+        : def.scopedModels
+      : catalogOptions?.scopedModels !== undefined
+        ? typeof catalogOptions.scopedModels === "function"
+          ? catalogOptions.scopedModels()
+          : catalogOptions.scopedModels
+        : Array.isArray(ctx.scopedModels)
+          ? ctx.scopedModels
+          : [];
+
+  interface RpcModelEntry {
+    readonly identity: string;
+    readonly provider: string;
+    readonly id: string;
+    readonly name: string;
+    readonly reasoning?: boolean;
+    readonly thinkingLevelMap?: Partial<Record<ModelThinkingLevel, unknown | null>>;
+    readonly scopedThinkingLevel?: ModelThinkingLevel;
+    readonly unavailable?: boolean;
+  }
+
+  const scopedSet = new Set<string>();
+  const scopedThinking = new Map<string, ModelThinkingLevel>();
+  const scopedRawMap = new Map<string, ModelPickerEntry>();
+
+  for (const entry of rawScoped) {
+    const provider = stripControlChars(entry.model.provider, false).trim();
+    const id = stripControlChars(entry.model.id, false).trim();
+    const identity = provider && id ? formatModelIdentity({ provider, id }) : "";
+    if (!parseModelIdentity(identity)) continue;
+    if (!scopedSet.has(identity)) {
+      scopedSet.add(identity);
+      scopedRawMap.set(identity, entry.model);
+    }
+    if (entry.thinkingLevel !== undefined && !scopedThinking.has(identity)) {
+      scopedThinking.set(identity, entry.thinkingLevel);
+    }
+  }
+
+  const byIdentity = new Map<string, RpcModelEntry>();
+  for (const entry of rawAvailable) {
+    const provider = stripControlChars(entry.provider, false).trim();
+    const id = stripControlChars(entry.id, false).trim();
+    const identity = provider && id ? formatModelIdentity({ provider, id }) : "";
+    if (!parseModelIdentity(identity) || byIdentity.has(identity)) continue;
+    byIdentity.set(identity, {
+      identity,
+      provider,
+      id,
+      name: stripControlChars(entry.name ?? "", false).trim(),
+      reasoning: entry.reasoning,
+      thinkingLevelMap: entry.thinkingLevelMap,
+      scopedThinkingLevel: scopedThinking.get(identity),
+    });
+  }
+
+  const scopedList: RpcModelEntry[] = [];
+  for (const identity of scopedSet) {
+    const existing = byIdentity.get(identity);
+    if (existing) {
+      scopedList.push(existing);
+    } else {
+      const raw = scopedRawMap.get(identity);
+      if (raw) {
+        const parsed = parseModelIdentity(identity);
+        if (parsed) {
+          const fallback: RpcModelEntry = {
+            identity,
+            provider: parsed.provider,
+            id: parsed.id,
+            name: stripControlChars(raw.name ?? "", false).trim(),
+            reasoning: raw.reasoning,
+            thinkingLevelMap: raw.thinkingLevelMap,
+            scopedThinkingLevel: scopedThinking.get(identity),
+          };
+          scopedList.push(fallback);
+          byIdentity.set(identity, fallback);
+        }
+      }
+    }
+  }
+
+  const allList = [...byIdentity.values()].sort(
+    (a, b) => a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id),
+  );
+
+  if (currentValue && !byIdentity.has(currentValue.model)) {
+    const parsed = parseModelIdentity(currentValue.model);
+    if (parsed) {
+      allList.unshift({
+        identity: currentValue.model,
+        provider: parsed.provider,
+        id: parsed.id,
+        name: "unavailable",
+        unavailable: true,
+      });
+    }
+  }
+
+  let scope: ModelPickerScope =
+    def.defaultModelScope === "scoped" || def.defaultModelScope === "all"
+      ? def.defaultModelScope
+      : scopedList.length > 0
+        ? "scoped"
+        : "all";
+  let query = "";
+
+  while (!ctx.signal?.aborted) {
+    const source = scope === "scoped" ? scopedList : allList;
+    const filtered = query
+      ? fuzzyFilter(
+          source,
+          query,
+          (m) => `${m.provider} ${m.identity} ${m.provider} ${m.id}${m.name ? ` ${m.name}` : ""}`,
+        )
+      : source;
+
+    const labelToAction = new Map<
+      string,
+      | { readonly kind: "toggleScope" }
+      | { readonly kind: "filter" }
+      | { readonly kind: "clearFilter" }
+      | { readonly kind: "clearValue" }
+      | { readonly kind: "model"; readonly model: RpcModelEntry }
+    >();
+    const options: string[] = [];
+
+    const scopeToggleLabel =
+      scope === "scoped"
+        ? `Scope: Scoped (${scopedList.length}) — Switch to All (${allList.length})`
+        : `Scope: All (${allList.length}) — Switch to Scoped (${scopedList.length})`;
+    labelToAction.set(scopeToggleLabel, { kind: "toggleScope" });
+    options.push(scopeToggleLabel);
+
+    const filterLabel = query ? `Filter: "${query}" — Change search` : "Filter models by text...";
+    labelToAction.set(filterLabel, { kind: "filter" });
+    options.push(filterLabel);
+
+    if (query) {
+      const clearFilterLabel = "Clear search filter";
+      labelToAction.set(clearFilterLabel, { kind: "clearFilter" });
+      options.push(clearFilterLabel);
+    }
+
+    if (def.allowClear) {
+      const clearValLabel = `${def.emptyLabel ?? "None"} — ${def.emptyDescription ?? "Clear model selection"}`;
+      labelToAction.set(clearValLabel, { kind: "clearValue" });
+      options.push(clearValLabel);
+    }
+
+    for (const model of filtered) {
+      const currentBadge = currentValue?.model === model.identity ? " (current)" : "";
+      const nameSuffix = model.name && model.name !== model.id ? ` — ${model.name}` : "";
+      let itemLabel = `${model.identity}${nameSuffix}${currentBadge}`;
+      if (labelToAction.has(itemLabel)) {
+        itemLabel = `${itemLabel} [${model.provider}]`;
+      }
+      labelToAction.set(itemLabel, { kind: "model", model });
+      options.push(itemLabel);
+    }
+
+    const choice = await ctx.ui.select(
+      `${def.label} — Step 1/2: Select model (${scope === "scoped" ? "Scoped" : "All"})`,
+      options,
+      dialogOpts,
+    );
+    if (choice === undefined || ctx.signal?.aborted) {
+      return undefined;
+    }
+
+    const picked = labelToAction.get(choice);
+    if (!picked) continue;
+
+    if (picked.kind === "toggleScope") {
+      scope = scope === "scoped" ? "all" : "scoped";
+      continue;
+    }
+    if (picked.kind === "filter") {
+      const nextQuery = await ctx.ui.input("Filter models (provider, id, or name)", query, dialogOpts);
+      if (nextQuery !== undefined) {
+        query = nextQuery.trim();
+      }
+      continue;
+    }
+    if (picked.kind === "clearFilter") {
+      query = "";
+      continue;
+    }
+    if (picked.kind === "clearValue") {
+      const validation = schema.validateField(key, null);
+      if (!validation.ok) {
+        ctx.ui.notify(validation.error, "warning");
+        continue;
+      }
+      return null;
+    }
+
+    // Step 2: Pick thinking level for the chosen model
+    const levels = getSupportedThinkingLevelsForModel(picked.model, def.thinkingLevels);
+    const levelLabelToValue = new Map<string, ModelThinkingLevel>();
+    const levelOptions: string[] = [];
+    for (const level of levels) {
+      const currentLevelMark =
+        currentValue?.model === picked.model.identity && currentValue.thinkingLevel === level
+          ? " (current)"
+          : "";
+      const scopedMark = picked.model.scopedThinkingLevel === level ? " · scoped" : "";
+      const label = `${level} — ${MODEL_THINKING_LEVEL_DESCRIPTIONS[level]}${scopedMark}${currentLevelMark}`;
+      levelLabelToValue.set(label, level);
+      levelOptions.push(label);
+    }
+    const backLabel = "← Back to models";
+    levelOptions.push(backLabel);
+
+    const levelChoice = await ctx.ui.select(
+      `${def.label} — Step 2/2: Thinking level for ${picked.model.identity}`,
+      levelOptions,
+      dialogOpts,
+    );
+    if (ctx.signal?.aborted) {
+      return undefined;
+    }
+    if (levelChoice === undefined || levelChoice === backLabel) {
+      continue;
+    }
+
+    const chosenLevel = levelLabelToValue.get(levelChoice);
+    if (!chosenLevel) continue;
+
+    const candidate: ModelSelection = {
+      model: picked.model.identity,
+      thinkingLevel: chosenLevel,
+    };
+    const validation = schema.validateField(key, candidate);
+    if (!validation.ok) {
+      ctx.ui.notify(validation.error, "warning");
+      continue;
+    }
+    return validation.value as ModelSelection;
+  }
+
+  return undefined;
+}
+
 async function editCustomField<TFields extends FieldMap>(
   ctx: ExtensionContext,
   schema: SettingsSchema<TFields>,
@@ -376,7 +656,7 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
   loaded: LoadedSettings<InferSettingsValues<TFields>>,
   options?: Pick<
     OpenSettingsDialogOptions<TFields>,
-    "saveMode" | "onApply" | "initialTab" | "initialField"
+    "saveMode" | "onApply" | "initialTab" | "initialField" | "availableModels" | "scopedModels"
   >,
 ): Promise<OpenSettingsDialogResult<InferSettingsValues<TFields>>> {
   const saveMode = options?.saveMode ?? schema.saveMode;
@@ -712,6 +992,17 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
             def,
             typeof currentValue === "number" ? currentValue : Number(currentValue ?? 0),
             dialogOpts,
+          );
+          break;
+        case "model":
+          nextValue = await editModelField(
+            ctx,
+            schema,
+            key,
+            def,
+            (currentValue as ModelSelection | null) ?? null,
+            dialogOpts,
+            options,
           );
           break;
         case "custom":

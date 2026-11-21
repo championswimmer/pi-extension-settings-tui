@@ -701,6 +701,10 @@ test("Subpath exports expose all expected symbols across root, /schema, /store, 
   assert.equal(schemaPkg.defineSettings, rootPkg.defineSettings);
   assert.equal(schemaPkg.field, rootPkg.field);
   assert.equal(typeof schemaPkg.validateFieldValue, "function");
+  assert.equal(typeof schemaPkg.parseModelIdentity, "function");
+  assert.equal(typeof schemaPkg.formatModelIdentity, "function");
+  assert.equal(typeof schemaPkg.getSupportedThinkingLevelsForModel, "function");
+  assert.ok(Array.isArray(schemaPkg.MODEL_THINKING_LEVELS));
 
   assert.equal(storePkg.createSettingsStore, rootPkg.createSettingsStore);
   assert.equal(storePkg.ConcurrencyConflictError, ConcurrencyConflictError);
@@ -712,6 +716,7 @@ test("Subpath exports expose all expected symbols across root, /schema, /store, 
   assert.equal(typeof dialogPkg.TextInputRoute, "function");
   assert.equal(typeof dialogPkg.SelectRoute, "function");
   assert.equal(typeof dialogPkg.MultiSelectRoute, "function");
+  assert.equal(typeof dialogPkg.ModelPickerRoute, "function");
 
   assert.equal(adapterPkg.openSettingsDialog, rootPkg.openSettingsDialog);
   assert.equal(adapterPkg.runRpcSettingsMenu, rootPkg.runRpcSettingsMenu);
@@ -875,4 +880,160 @@ test("openSettingsDialog forwards schema and call-time settingsFile to store pat
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
+});
+
+test("openSettingsDialog auto-discovers Pi ctx.modelRegistry and ctx.scopedModels in both TUI and RPC modes", async () => {
+  const modelCatalog = [
+    {
+      provider: "anthropic",
+      id: "claude-sonnet-4-5",
+      name: "Claude Sonnet 4.5",
+      reasoning: true,
+      thinkingLevelMap: { xhigh: "xhigh" },
+    },
+    {
+      provider: "openai",
+      id: "gpt-5-mini",
+      name: "GPT-5 Mini",
+      reasoning: true,
+    },
+    {
+      provider: "google",
+      id: "gemini-2.5-flash",
+      name: "Gemini 2.5 Flash",
+      reasoning: false,
+    },
+  ];
+  const scoped = [{ model: modelCatalog[0], thinkingLevel: "high" }];
+
+  const schema = defineSettings({
+    id: "model-adapter-test",
+    title: "Model Adapter Test",
+    scopes: ["global"],
+    saveMode: "draft",
+    fields: {
+      summaryModel: field.model({
+        label: "Summary model",
+        default: null,
+        emptyLabel: "Active model",
+      }),
+    },
+  });
+
+  // 1. TUI mode automatically pulls from ctx.modelRegistry.getAvailable() and ctx.scopedModels
+  const tuiAdapter = createMemoryStorageAdapter();
+  const tui = createMockTui();
+  const theme = createMockTheme();
+  const keybindings = createMockKeybindings();
+
+  const { ctx: tuiCtx } = createBaseContext({
+    mode: "tui",
+    hasUI: true,
+    modelRegistry: { getAvailable: () => modelCatalog },
+    scopedModels: scoped,
+    ui: {
+      theme,
+      notify: () => {},
+      select: async () => undefined,
+      confirm: async () => false,
+      input: async () => undefined,
+      editor: async () => undefined,
+      custom: async (factory, opts) => {
+        let resolved;
+        const donePromise = new Promise((resolve) => {
+          resolved = resolve;
+        });
+        const comp = await factory(tui, theme, keybindings, (res) => resolved(res));
+        opts?.onHandle?.({
+          hide() {},
+          setHidden() {},
+          isHidden: () => false,
+          focus() {},
+          unfocus() {},
+          isFocused: () => true,
+          getBounds: () => undefined,
+        });
+
+        comp.render(84);
+        // Enter -> opens ModelPickerRoute (starts on Scoped with claude-sonnet-4-5)
+        comp.handleInput("\r");
+        // Tab -> switches to All, type "gpt" -> matches openai/gpt-5-mini
+        comp.handleInput("\t");
+        for (const ch of "gpt") comp.handleInput(ch);
+        // Enter -> Step 2 (thinking level, preselected "medium")
+        comp.handleInput("\r");
+        // Down -> "high", Enter -> commit { model: "openai/gpt-5-mini", thinkingLevel: "high" }
+        comp.handleInput("\u001b[B");
+        comp.handleInput("\r");
+        // Ctrl+S -> save
+        comp.handleInput("\u0013");
+
+        const result = await donePromise;
+        comp.dispose?.();
+        return result;
+      },
+    },
+  });
+
+  const tuiResult = await openSettingsDialog(tuiCtx, { schema, adapter: tuiAdapter });
+  assert.equal(tuiResult.saved, true);
+  assert.deepEqual(tuiResult.values.summaryModel, {
+    model: "openai/gpt-5-mini",
+    thinkingLevel: "high",
+  });
+
+  // 2. RPC mode supports scope toggle, text filter, Step 1 -> Step 2 -> Back -> final commit
+  const rpcAdapter = createMemoryStorageAdapter();
+  const rpcSelectQueue = [
+    // Root menu: choose Summary model
+    (opts) => opts.find((o) => o.includes("Summary model:")),
+    // Step 1 (Scoped): toggle to All
+    (opts) => opts.find((o) => o.includes("Switch to All")),
+    // Step 1 (All): filter by text
+    (opts) => opts.find((o) => o.includes("Filter models")),
+    // Step 1 (filtered "gemini"): pick google/gemini-2.5-flash
+    (opts) => opts.find((o) => o.includes("google/gemini-2.5-flash")),
+    // Step 2 (off only): go back to models
+    (opts) => opts.find((o) => o.includes("Back to models")),
+    // Step 1: clear filter
+    (opts) => opts.find((o) => o === "Clear search filter"),
+    // Step 1: pick anthropic/claude-sonnet-4-5
+    (opts) => opts.find((o) => o.includes("anthropic/claude-sonnet-4-5")),
+    // Step 2: pick xhigh
+    (opts) => opts.find((o) => o.startsWith("xhigh —")),
+    // Root menu: Save changes
+    (opts) => opts.find((o) => o.startsWith("Save changes")),
+  ];
+  const rpcInputQueue = ["gemini"];
+
+  const { ctx: rpcCtx } = createBaseContext({
+    mode: "rpc",
+    hasUI: true,
+    modelRegistry: { getAvailable: () => modelCatalog },
+    scopedModels: scoped,
+    ui: {
+      theme,
+      notify: () => {},
+      select: async (_title, options) => {
+        const next = rpcSelectQueue.shift();
+        assert.ok(next, `Unexpected RPC select: ${_title}`);
+        return next(options);
+      },
+      input: async () => rpcInputQueue.shift(),
+      editor: async () => undefined,
+      confirm: async () => true,
+      custom: async () => {
+        throw new Error("custom() must not be called in RPC mode");
+      },
+    },
+  });
+
+  const rpcResult = await openSettingsDialog(rpcCtx, { schema, adapter: rpcAdapter });
+  assert.equal(rpcSelectQueue.length, 0);
+  assert.equal(rpcInputQueue.length, 0);
+  assert.equal(rpcResult.saved, true);
+  assert.deepEqual(rpcResult.values.summaryModel, {
+    model: "anthropic/claude-sonnet-4-5",
+    thinkingLevel: "xhigh",
+  });
 });

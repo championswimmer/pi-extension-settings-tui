@@ -1,6 +1,6 @@
 # Field Types & Common Options
 
-`pi-extension-settings-tui` provides 7 declarative field builders on `field` (`field.boolean`, `field.enum`, `field.multiSelect`, `field.string`, `field.number`, `field.integer`, and `field.custom<T>`). Each builder returns a strongly typed definition consumed by schema validation, storage diffing, the TUI dialog, and the RPC menu.
+`pi-extension-settings-tui` provides 8 declarative field builders on `field` (`field.boolean`, `field.enum`, `field.multiSelect`, `field.string`, `field.number`, `field.integer`, `field.model`, and `field.custom<T>`). Each builder returns a strongly typed definition consumed by schema validation, storage diffing, the TUI dialog, and the RPC menu.
 
 > **Related guides:** [Getting Started](getting-started.md) · [Storage & Security](storage-and-security.md) · [TUI, Mouse & RPC](tui-mouse-and-rpc.md) · [Overview](../README.md)
 
@@ -259,7 +259,63 @@ const workers = field.integer({
 
 ---
 
-## 6. `field.custom<T>`
+## 6. `field.model`
+
+First-class two-step Pi model + thinking level picker.
+
+- **TypeScript type:**
+  - `ModelSelection` (`{ readonly model: string; readonly thinkingLevel: ModelThinkingLevel }`) when `default` is a `ModelSelection` and `allowClear` is not `true`.
+  - `ModelSelection | null` when `default: null` (automatically enables `allowClear: true`) or `allowClear: true`.
+- **Saved value:** Stores both `model` (canonical `"provider/model-id"` string, preserving nested slashes/colons such as `"openrouter/qwen/qwen3-coder:exacto"`) and `thinkingLevel` (`"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`).
+- **Automatic Pi integration:** `openSettingsDialog(ctx, { schema })` automatically feeds `ctx.modelRegistry.getAvailable()` and `ctx.scopedModels` into the picker — no extra wiring needed.
+- **Two-step TUI interaction (`ModelPickerRoute`):**
+  1. **Step 1 (Select model):** Fuzzy search over provider, model ID, and model name; toggle between **Scoped** models and **All** available models via `Tab` or clicking `[Scoped (N)]` / `[All (M)]`. When `allowClear: true`, includes a clear row at the top to reset to `null`.
+  2. **Step 2 (Thinking level):** Lists the thinking levels supported by the chosen model (`off` only for non-reasoning models; respects `thinkingLevelMap` for `xhigh`/`max`/disabled levels), highlights the current/scoped thinking level, and supports `Esc` / clicking `[← Models]` to return to Step 1.
+- **Default formatting & tone:** Displays `"provider/model-id (thinkingLevel)"` (`"accent"`), or `emptyLabel ?? "None"` (`"muted"`) when `null`.
+
+| Specific Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `allowClear` | `boolean` | `true` when `default: null`, else `false` | Allows clearing the selection to `null` (skips Step 2). |
+| `emptyLabel` | `string` | `"None"` | Display text when `null` and label for the clear row. |
+| `emptyDescription` | `string` | `"Clear model selection"` | Description shown on the clear row in the picker. |
+| `defaultModelScope` | `"auto" \| "scoped" \| "all"` | `"auto"` | Initial scope tab (`"auto"` starts on `"scoped"` when scoped models exist, else `"all"`). |
+| `thinkingLevels` | `readonly ModelThinkingLevel[]` | *(model-supported levels)* | Optional allowlist restricting selectable thinking levels. |
+| `defaultThinkingLevel` | `ModelThinkingLevel` | *(model/scoped default or `"medium"`)* | Preferred thinking level preselected in Step 2 for newly chosen models. |
+| `models` | `readonly ModelPickerEntry[] \| ((ctx?: unknown) => readonly ModelPickerEntry[])` | `ctx.modelRegistry.getAvailable()` | Optional override/source for available models. |
+| `scopedModels` | `readonly ScopedModelEntry[] \| ((ctx?: unknown) => readonly ScopedModelEntry[])` | `ctx.scopedModels` | Optional override/source for scoped models. |
+
+```ts
+import { defineSettings, field, parseModelIdentity } from "pi-extension-settings-tui";
+
+const schema = defineSettings({
+  id: "pruner",
+  title: "Pruner Settings",
+  fields: {
+    summaryModel: field.model({
+      label: "Summary model",
+      description: "Model and thinking level used to summarize pruned tool calls.",
+      default: null,
+      emptyLabel: "Active model (default)",
+      emptyDescription: "Use the currently active Pi session model",
+    }),
+    fallbackModel: field.model({
+      label: "Fallback model",
+      description: "Explicit fallback model when the primary model fails.",
+      default: { model: "anthropic/claude-haiku-4-5", thinkingLevel: "low" },
+      defaultModelScope: "all",
+    }),
+  },
+});
+
+// Resolving a saved ModelSelection back to a Pi model:
+// const parsed = selection ? parseModelIdentity(selection.model) : null;
+// const piModel = parsed ? ctx.modelRegistry.find(parsed.provider, parsed.id) : ctx.model;
+// const thinking = selection?.thinkingLevel;
+```
+
+---
+
+## 7. `field.custom<T>`
 
 `field.custom<T>` is an escape hatch for domain-specific values and pickers (for example, choosing a model, agent profile, or structured rule) that don't fit the built-in routes.
 

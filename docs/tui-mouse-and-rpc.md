@@ -26,6 +26,7 @@ Inside that single overlay, `SettingsDialogComponent` maintains an internal navi
 - **Pushed sub-routes:** Rendered inside the same rounded box frame with a breadcrumb header (e.g. `Demo Settings › Filters › Active tags`) and a `[Esc Back]` footer pill:
   - `SelectRoute` — Searchable single-select picker (`Input` + `fuzzyFilter`) for `field.enum` with `> 3` options or `display: "picker"`.
   - `MultiSelectRoute` — Searchable `[x]`/`[ ]` checklist with collapsible `[-]`/`[+]` groups, `Ctrl+A` toggle all visible, count bounds (`minItems`/`maxItems`), and inline `+ Add custom "<query>"` when `allowCustom: true`.
+  - `ModelPickerRoute` — Two-step Pi model + thinking level picker for `field.model`: Step 1 fuzzy-searchable list with clickable/Tab-toggleable `Scoped` vs `All` model views (and optional clear row); Step 2 thinking level selector tailored to the chosen model's reasoning capabilities.
   - `TextInputRoute` — Single-line `Input` (`field.string`, `field.number`, `field.integer`) or multiline `Editor` (`field.string` with `multiline: true`), with live validation banners.
   - `ConfirmRoute` — Confirmation dialog used by `Restore defaults` (with destructive styling and `Cancel` focused by default).
   - Custom sub-routes — Any `Component & Focusable` (with optional `title`, `handleMouse`, and `dispose()`) returned by `field.custom({ openSubroute })`.
@@ -76,6 +77,11 @@ Extensions configure `saveMode` either on the schema via `defineSettings({ saveM
 | **MultiSelectRoute** | `Ctrl+A` | Toggle all currently filtered options on/off |
 | **MultiSelectRoute** | `Enter` | Toggle group fold if on a group header, add custom item if on custom row, otherwise validate & commit selection |
 | **MultiSelectRoute** | `Esc` | Cancel and pop back to root |
+| **ModelPickerRoute (Step 1)** | `Tab` / `Shift+Tab` | Toggle between `Scoped` models and `All` available models |
+| **ModelPickerRoute (Step 1)** | Typing / Backspace | Fuzzy-filter models by provider, model ID, and name |
+| **ModelPickerRoute (Step 1)** | `↑` / `↓`, `PgUp` / `PgDn`, `Enter` | Navigate models and advance to Step 2 (or clear to `null` on clear row) |
+| **ModelPickerRoute (Step 2)** | `↑` / `↓`, `Enter` / `Space` | Select thinking level and commit `{ model, thinkingLevel }` |
+| **ModelPickerRoute (Step 2)** | `Esc` / `Backspace` / `←` | Return to Step 1 (preserving search query & scope) |
 | **TextInputRoute (single-line)** | `Enter` (or `tui.input.submit`) | Validate and commit value |
 | **TextInputRoute (multiline)** | `Enter` | Insert newline at cursor |
 | **TextInputRoute (multiline)** | `Ctrl+S` | Validate and commit multiline value |
@@ -103,11 +109,12 @@ Extensions configure `saveMode` either on the schema via `defineSettings({ saveM
 - **Tab chips:** Single left click switches tabs immediately.
 - **Root rows:**
   - **Boolean fields**, **Save scope**, and **Restore defaults** activate immediately on a single click.
-  - **All other fields** (`enum`, `multiSelect`, `string`, `number`, `integer`, `custom`) select on the first click and open/activate on a second click (either a double-click `clickCount === 2`, or clicking a row that was already selected on `press`).
+  - **All other fields** (`enum`, `multiSelect`, `string`, `number`, `integer`, `model`, `custom`) select on the first click and open/activate on a second click (either a double-click `clickCount === 2`, or clicking a row that was already selected on `press`).
 - **Footer action pills:** `[Ctrl+S Save]`, `[Esc Discard]`, `[Esc Close]`, `[R Reload]`, `[Esc Back]`.
 - **Sub-route controls:**
   - `SelectRoute`: clicking the `/` search bar forwards mouse events to `Input`; clicking an option commits it.
   - `MultiSelectRoute`: clicking `/` focuses search; clicking a `[+]`/`[-]` group header folds/unfolds it; clicking an option or `+ Add custom` row toggles/adds it; clicking `[Enter Apply]` or `[Esc Cancel]` commits or cancels.
+  - `ModelPickerRoute`: clicking `[Scoped (N)]` / `[All (M)]` toggles model scope; clicking `/` focuses search; clicking a model advances to Step 2; in Step 2, clicking `[← Models]` returns to Step 1 and clicking a thinking level commits `{ model, thinkingLevel }`.
   - `TextInputRoute`: clicking inside the `Input`/`Editor` widget bounds forwards local coordinates; clicking `[Enter Apply]` / `[Ctrl+S Apply]` or `[Esc Cancel]` commits or cancels.
   - `ConfirmRoute`: clicking `[Confirm]` / `[Restore]` or `[Cancel]` confirms or cancels.
 
@@ -151,6 +158,7 @@ When `ctx.mode === "rpc" && ctx.hasUI`, `openSettingsDialog` delegates to `runRp
   - `multiSelect` → iterative `ctx.ui.select` toggle loop (`[x]` / `[ ]`, `+ Add custom item`, `Done`)
   - `string` → `ctx.ui.input` or `ctx.ui.editor` (when `multiline: true`)
   - `number` / `integer` → `ctx.ui.input` with numeric parsing and retry loop
+  - `model` → two-step `ctx.ui.select` flow (Step 1: Scoped/All toggle, text filter via `ctx.ui.input`, optional clear, model selection; Step 2: thinking level selection with `← Back to models`)
   - `custom` → calls `field.rpcEdit(ctx, currentValue, draft)` if provided, or notifies that TUI mode is required
 - Includes `Save scope`, `Restore defaults` (with `ctx.ui.confirm`), and `Save changes` / `Discard & close` (draft mode) or `Done` (immediate mode).
 
@@ -181,5 +189,5 @@ When running non-interactively (e.g. `pi -p` or `--mode json` or `!ctx.hasUI`), 
 | `pi-extension-settings-tui` | Everything from `/schema`, `/store`, `/dialog`, and `/adapter` | `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui` |
 | `pi-extension-settings-tui/schema` | `defineSettings`, `field`, `validateFieldValue`, `validatePartialSettings`, `stripControlChars`, `findSecretKeys`, `SECRET_KEY_PATTERN`, `deepEqual`, `cloneValue`, schema types | Pure JS/TS (zero Pi or Node `fs` imports) |
 | `pi-extension-settings-tui/store` | `SettingsStore`, `createSettingsStore`, `createJsonFileStorageAdapter`, `createSessionStorageAdapter`, `createMemoryStorageAdapter`, `resolveDefaultAgentDir`, `resolveScopeFilePath`, `ConcurrencyConflictError`, `SettingsSecurityError`, `fs-hardening` helpers | Node.js built-ins only (zero Pi imports) |
-| `pi-extension-settings-tui/dialog` | `SettingsDialogComponent`, `SelectRoute`, `MultiSelectRoute`, `TextInputRoute`, `ConfirmRoute`, `HitRegionTracker`, `renderPillRow`, `frame` helpers | `@earendil-works/pi-tui`, `@earendil-works/pi-coding-agent` |
+| `pi-extension-settings-tui/dialog` | `SettingsDialogComponent`, `SelectRoute`, `MultiSelectRoute`, `ModelPickerRoute`, `TextInputRoute`, `ConfirmRoute`, `HitRegionTracker`, `renderPillRow`, `frame` helpers | `@earendil-works/pi-tui`, `@earendil-works/pi-coding-agent` |
 | `pi-extension-settings-tui/adapter` | `openSettingsDialog`, `runRpcSettingsMenu`, `OpenSettingsDialogOptions`, `OpenSettingsDialogResult` | `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui` |

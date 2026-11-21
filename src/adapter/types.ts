@@ -3,7 +3,9 @@ import type {
   FieldMap,
   FieldProvenance,
   InferSettingsValues,
+  ModelPickerEntry,
   SaveMode,
+  ScopedModelEntry,
   SettingsSchema,
   SettingsScope,
   StoragePathConfig,
@@ -26,6 +28,10 @@ export interface OpenSettingsDialogOptions<TFields extends FieldMap> {
   readonly saveMode?: SaveMode;
   readonly preferredWidth?: number;
   readonly overlayOptions?: OverlayOptions;
+  /** Optional override for available models in `field.model` pickers (defaults to `ctx.modelRegistry.getAvailable()`). */
+  readonly availableModels?: readonly ModelPickerEntry[] | (() => readonly ModelPickerEntry[]);
+  /** Optional override for scoped models in `field.model` pickers (defaults to `ctx.scopedModels`). */
+  readonly scopedModels?: readonly ScopedModelEntry[] | (() => readonly ScopedModelEntry[]);
   readonly onApply?: (
     next: InferSettingsValues<TFields>,
     meta: {

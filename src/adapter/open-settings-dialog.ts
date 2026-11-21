@@ -5,6 +5,8 @@ import type {
   FieldMap,
   FieldProvenance,
   InferSettingsValues,
+  ModelPickerEntry,
+  ScopedModelEntry,
   SettingsSchema,
   SettingsScope,
 } from "../schema/index.js";
@@ -85,6 +87,12 @@ export async function openSettingsDialog<TFields extends FieldMap>(
   const loaded = await store.load({ trustedProject });
   const initialScope = resolveInitialScope(schema, loaded.trustedProject);
 
+  const availableModels: readonly ModelPickerEntry[] | (() => readonly ModelPickerEntry[]) =
+    options.availableModels ??
+    (() => (typeof ctx.modelRegistry?.getAvailable === "function" ? ctx.modelRegistry.getAvailable() : []));
+  const scopedModels: readonly ScopedModelEntry[] | (() => readonly ScopedModelEntry[]) =
+    options.scopedModels ?? (() => (Array.isArray(ctx.scopedModels) ? ctx.scopedModels : []));
+
   if (ctx.mode === "tui" && ctx.hasUI) {
     if (ctx.signal?.aborted) {
       return {
@@ -151,6 +159,8 @@ export async function openSettingsDialog<TFields extends FieldMap>(
             initialField: options.initialField,
             saveMode: options.saveMode,
             preferredWidth: options.preferredWidth,
+            availableModels,
+            scopedModels,
             onApply: wrappedOnApply,
           });
           componentRef = component;
@@ -205,6 +215,8 @@ export async function openSettingsDialog<TFields extends FieldMap>(
       onApply: options.onApply,
       initialTab: options.initialTab,
       initialField: options.initialField,
+      availableModels,
+      scopedModels,
     });
   }
 
