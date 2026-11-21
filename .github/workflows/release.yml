@@ -1,0 +1,82 @@
+name: Release
+
+# Publishes to npm via Trusted Publishing (OIDC) whenever a `vX.Y.Z` tag is pushed.
+# No NPM_TOKEN secret is used: npm exchanges the GitHub OIDC token for a
+# short-lived publish credential, and provenance attestations are generated
+# automatically.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write # create the GitHub Release
+  id-token: write # npm Trusted Publishing (OIDC)
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Ensure npm supports Trusted Publishing
+        # Trusted Publishing requires npm >= 11.5.1
+        run: npm install -g npm@latest && npm --version
+
+      - name: Verify tag matches package.json version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          LOCK_VERSION="$(node -p "require('./package-lock.json').version")"
+          echo "tag=$TAG_VERSION package.json=$PKG_VERSION package-lock.json=$LOCK_VERSION"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ] || [ "$PKG_VERSION" != "$LOCK_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json ($PKG_VERSION) / package-lock.json ($LOCK_VERSION)"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Pack (dry run)
+        run: npm pack --dry-run
+
+      - name: Publish
+        # prepublishOnly re-runs clean + build + test.
+        # Pre-release versions (e.g. 1.2.3-beta.1) go to the `next` dist-tag.
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            npm publish --tag next
+          else
+            npm publish
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then PRERELEASE="--prerelease"; else PRERELEASE=""; fi
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag \
+            $PRERELEASE

@@ -30,6 +30,8 @@ pi-extension-settings-tui/
 ├── tsconfig.json                      # strict, NodeNext, verbatimModuleSyntax, emits dist/
 ├── README.md                          # Concise human-facing overview, preview & quickstart
 ├── AGENTS.md                          # This file
+├── .github/workflows/release.yml      # Tag-triggered (vX.Y.Z) npm publish via Trusted Publishing (OIDC)
+├── .claude/skills/release/SKILL.md    # /release major|minor|patch [--watch] workflow
 ├── docs/
 │   ├── getting-started.md             # Full walkthrough, startup loading & demo setup
 │   ├── field-types.md                 # Declarative fields & custom sub-route reference
@@ -159,5 +161,6 @@ tmux new-session -d -s pi-settings-smoke -x 112 -y 34 -c "$TMP_DIR/project" \
 ## Git & release conventions
 
 - Keep `package.json` and `package-lock.json` versions in sync.
-- Never run `npm publish`, create release tags, or force-push without explicit user authorization.
+- Releases are cut with the `/release major|minor|patch [--watch]` skill (`.claude/skills/release/SKILL.md`): bump version, commit `chore(release): vX.Y.Z`, annotated tag `vX.Y.Z`, push `main` + the tag. Pushing the tag triggers `.github/workflows/release.yml`, which verifies tag == package.json == package-lock.json, runs typecheck/tests, publishes to npm via Trusted Publishing (no `NPM_TOKEN`), and creates a GitHub Release.
+- Never run `npm publish` locally. Never create release tags or force-push without explicit user authorization (invoking `/release` counts as authorization for that release only).
 - Keep `README.md` human-oriented (value proposition, visual preview, usage examples) and put internal architecture, Pi gotchas, and agent workflow rules here in `AGENTS.md`.
