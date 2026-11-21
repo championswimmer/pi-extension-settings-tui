@@ -34,13 +34,11 @@ import {
 import { HitRegionTracker, renderPillRow, type PillItem } from "../hit-test.js";
 import type { ChildBounds, DialogRouteComponent } from "../types.js";
 
-/** Configuration for `ModelPickerRoute`. */
-export interface ModelPickerRouteOptions {
+interface ModelPickerRouteBaseOptions {
   readonly title: string;
   readonly description?: string;
   readonly availableModels: readonly ModelPickerEntry[];
   readonly scopedModels?: readonly ScopedModelEntry[];
-  readonly currentValue: ModelSelection | null;
   readonly allowClear?: boolean;
   readonly emptyLabel?: string;
   readonly emptyDescription?: string;
@@ -49,10 +47,26 @@ export interface ModelPickerRouteOptions {
   readonly defaultThinkingLevel?: ModelThinkingLevel;
   readonly theme: Theme;
   readonly keybindings: KeybindingsManager;
-  readonly onSelect: (value: ModelSelection | null) => void;
   readonly onCancel: () => void;
   readonly getMaxHeight?: () => number;
 }
+
+export interface ModelPickerWithThinkingOptions extends ModelPickerRouteBaseOptions {
+  readonly includeThinking?: true;
+  readonly currentValue: ModelSelection | null;
+  readonly onSelect: (value: ModelSelection | null) => void;
+}
+
+export interface ModelPickerModelOnlyOptions extends ModelPickerRouteBaseOptions {
+  readonly includeThinking: false;
+  readonly currentValue: string | null;
+  readonly onSelect: (value: string | null) => void;
+}
+
+/** Configuration for `ModelPickerRoute`. */
+export type ModelPickerRouteOptions =
+  | ModelPickerWithThinkingOptions
+  | ModelPickerModelOnlyOptions;
 
 interface NormalizedModelItem {
   readonly identity: string;
@@ -222,7 +236,7 @@ export class ModelPickerRoute implements DialogRouteComponent {
     }
     this.scopedModels = scopedList;
 
-    const currentIdentity = options.currentValue?.model;
+    const currentIdentity = this.getCurrentModelIdentity();
     const allList = [...availableByIdentity.values()].sort((a, b) => {
       if (currentIdentity) {
         const aCurrent = a.identity === currentIdentity;
@@ -274,6 +288,11 @@ export class ModelPickerRoute implements DialogRouteComponent {
   /** Active model list scope (`"scoped"` or `"all"`). */
   getScope(): ModelPickerScope {
     return this.activeScope;
+  }
+
+  private getCurrentModelIdentity(): string | undefined {
+    const { currentValue } = this.options;
+    return typeof currentValue === "string" ? currentValue : currentValue?.model;
   }
 
   invalidate(): void {
@@ -342,15 +361,16 @@ export class ModelPickerRoute implements DialogRouteComponent {
       return;
     }
 
+    const currentIdentity = this.getCurrentModelIdentity();
     if (query) {
       // When actively searching, highlight the top fuzzy match immediately.
       this.modelSelectedIndex = 0;
     } else if (preferCurrent) {
       if (this.options.currentValue === null && this.options.allowClear) {
         this.modelSelectedIndex = 0;
-      } else if (this.options.currentValue) {
+      } else if (currentIdentity) {
         const currentIdx = rows.findIndex(
-          (r) => r.kind === "model" && r.item.identity === this.options.currentValue?.model,
+          (r) => r.kind === "model" && r.item.identity === currentIdentity,
         );
         this.modelSelectedIndex = currentIdx >= 0 ? currentIdx : 0;
       } else {
@@ -380,7 +400,10 @@ export class ModelPickerRoute implements DialogRouteComponent {
       this.options.thinkingLevels,
     );
 
-    const current = this.options.currentValue;
+    const current =
+      this.options.currentValue && typeof this.options.currentValue === "object"
+        ? this.options.currentValue
+        : null;
     const preferredLevel = this.resolveInitialThinkingLevel(item, this.availableThinkingLevels, current);
     const idx = this.availableThinkingLevels.indexOf(preferredLevel);
     this.thinkingSelectedIndex = idx >= 0 ? idx : 0;
@@ -430,11 +453,15 @@ export class ModelPickerRoute implements DialogRouteComponent {
       this.options.onSelect(null);
       return;
     }
+    if (this.options.includeThinking === false) {
+      this.options.onSelect(row.item.identity);
+      return;
+    }
     this.enterThinkingStep(row.item);
   }
 
   private commitThinkingSelection(): void {
-    if (!this.pendingModel) return;
+    if (this.options.includeThinking === false || !this.pendingModel) return;
     const level = this.availableThinkingLevels[this.thinkingSelectedIndex];
     if (!level) return;
     this.options.onSelect({
@@ -460,12 +487,15 @@ export class ModelPickerRoute implements DialogRouteComponent {
     const { theme } = this.options;
     const lines: string[] = [];
 
-    // Header row: Step 1/2 + clickable [Scoped (N)] [All (M)] pills
+    // Header row: Step 1/2 (or Select model in 1-step mode) + clickable [Scoped (N)] [All (M)] pills
     const headerY = lines.length;
     const compactHeader = safeWidth < 50;
-    const stepText = compactHeader
-      ? theme.fg("accent", theme.bold("1/2 Model"))
-      : theme.fg("accent", theme.bold("Step 1/2")) + theme.fg("muted", " · Select model");
+    const stepText =
+      this.options.includeThinking === false
+        ? theme.fg("accent", theme.bold(compactHeader ? "Model" : "Select model"))
+        : compactHeader
+          ? theme.fg("accent", theme.bold("1/2 Model"))
+          : theme.fg("accent", theme.bold("Step 1/2")) + theme.fg("muted", " · Select model");
 
     const scopedLabel = compactHeader
       ? `Scoped(${this.scopedModels.length})`
@@ -561,12 +591,11 @@ export class ModelPickerRoute implements DialogRouteComponent {
     }
 
     if (showHint && lines.length < maxHeight) {
-      lines.push(
-        fitToWidth(
-          theme.fg("dim", "Tab scope · ↑/↓ move · Type to filter · Enter next · Esc back"),
-          safeWidth,
-        ),
-      );
+      const hintText =
+        this.options.includeThinking === false
+          ? "Tab scope · ↑/↓ move · Type to filter · Enter select · Esc back"
+          : "Tab scope · ↑/↓ move · Type to filter · Enter next · Esc back";
+      lines.push(fitToWidth(theme.fg("dim", hintText), safeWidth));
     }
 
     return lines.slice(0, maxHeight);
@@ -592,7 +621,7 @@ export class ModelPickerRoute implements DialogRouteComponent {
     }
 
     const { item } = row;
-    const isCurrent = this.options.currentValue?.model === item.identity;
+    const isCurrent = this.getCurrentModelIdentity() === item.identity;
     const mark = isCurrent ? theme.fg("success", "●") : " ";
     const prefix = `${cursor} ${mark} `;
     const providerBadge = theme.fg("muted", `[${item.provider}]`);
@@ -680,13 +709,17 @@ export class ModelPickerRoute implements DialogRouteComponent {
       lines.push(renderScrollIndicator("up", win.aboveCount, safeWidth, theme));
     }
 
+    const currentSelection =
+      this.options.currentValue && typeof this.options.currentValue === "object"
+        ? this.options.currentValue
+        : null;
     const isCurrentModel =
-      Boolean(model) && this.options.currentValue?.model === model?.identity;
+      Boolean(model) && currentSelection?.model === model?.identity;
 
     for (let idx = win.start; idx < win.end; idx++) {
       const level = this.availableThinkingLevels[idx]!;
       const isSelected = idx === this.thinkingSelectedIndex;
-      const isCurrent = isCurrentModel && this.options.currentValue?.thinkingLevel === level;
+      const isCurrent = isCurrentModel && currentSelection?.thinkingLevel === level;
       const isScopedLevel = model?.scopedThinkingLevel === level;
       const rowY = lines.length;
 

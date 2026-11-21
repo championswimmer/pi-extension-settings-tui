@@ -688,6 +688,7 @@ describe("store / defense-in-depth fs hardening", () => {
     const loaded = await store.load({ trustedProject: true });
     assert.equal(loaded.effective.enabled, false);
     assert.equal(loaded.effective.mode, "strict");
+    assert.deepEqual(loaded.migratedScopes, ["global", "project"]);
 
     // restoreDefaults deletes only project scope
     const restoredProj = await store.restoreDefaults({
@@ -708,6 +709,97 @@ describe("store / defense-in-depth fs hardening", () => {
       expectedSnapshot: restoredProj.loaded.snapshot,
     });
     assert.equal(restoredAgain.deletedFile, false);
+  });
+
+  it("tracks migratedScopes and persists migrations only when persistMigration: true", async () => {
+    const root = makeTempDir();
+    const agentDir = path.join(root, "agent");
+    const cwd = path.join(root, "repo");
+
+    // 1. No migrate hook & no-op migrate hook -> migratedScopes is []
+    const noMigrateStore = createSettingsStore(createSampleSchema(), { agentDir, cwd });
+    const noMigratePaths = noMigrateStore.getPaths();
+    fs.mkdirSync(path.dirname(noMigratePaths.global), { recursive: true });
+    fs.writeFileSync(noMigratePaths.global, JSON.stringify({ enabled: false }), "utf8");
+    const noMigrateLoaded = await noMigrateStore.load();
+    assert.deepEqual(noMigrateLoaded.migratedScopes, []);
+
+    const noopSchema = createSampleSchema({
+      migrate: (raw) => ({ ...raw }),
+    });
+    const noopStore = createSettingsStore(noopSchema, { agentDir, cwd });
+    const noopLoaded = await noopStore.load();
+    assert.deepEqual(noopLoaded.migratedScopes, []);
+
+    // 2. Legacy keys present: persistMigration defaults to false (disk untouched)
+    const migrateRoot = makeTempDir();
+    const mAgentDir = path.join(migrateRoot, "agent");
+    const mCwd = path.join(migrateRoot, "repo");
+    const migrateSchema = createSampleSchema({
+      migrate: (raw, scope) => {
+        const next = { ...raw };
+        if (typeof next.legacyFlag === "boolean") {
+          next.enabled = next.legacyFlag;
+          delete next.legacyFlag;
+        }
+        if (scope === "project" && next.legacyMode) {
+          next.mode = next.legacyMode;
+          delete next.legacyMode;
+        }
+        return next;
+      },
+    });
+
+    const mStore = createSettingsStore(migrateSchema, { agentDir: mAgentDir, cwd: mCwd });
+    const mPaths = mStore.getPaths();
+    fs.mkdirSync(path.dirname(mPaths.global), { recursive: true });
+    fs.mkdirSync(path.dirname(mPaths.project), { recursive: true });
+    const initialGlobalRaw = JSON.stringify({ legacyFlag: false });
+    const initialProjectRaw = JSON.stringify({ legacyMode: "strict" });
+    fs.writeFileSync(mPaths.global, initialGlobalRaw, "utf8");
+    fs.writeFileSync(mPaths.project, initialProjectRaw, "utf8");
+
+    // Untrusted load only migrates global
+    const untrustedLoad = await mStore.load({ trustedProject: false });
+    assert.deepEqual(untrustedLoad.migratedScopes, ["global"]);
+    assert.equal(fs.readFileSync(mPaths.global, "utf8"), initialGlobalRaw);
+    assert.equal(fs.readFileSync(mPaths.project, "utf8"), initialProjectRaw);
+
+    // Trusted load with default persistMigration (false) reports both scopes and leaves disk untouched
+    const dryLoad = await mStore.load({ trustedProject: true });
+    assert.deepEqual(dryLoad.migratedScopes, ["global", "project"]);
+    assert.equal(fs.readFileSync(mPaths.global, "utf8"), initialGlobalRaw);
+    assert.equal(fs.readFileSync(mPaths.project, "utf8"), initialProjectRaw);
+
+    // 3. persistMigration: true rewrites migrated layers, strips legacy keys, updates snapshot
+    const persisted = await mStore.load({ trustedProject: true, persistMigration: true });
+    assert.deepEqual(persisted.migratedScopes, ["global", "project"]);
+    assert.deepEqual(JSON.parse(fs.readFileSync(mPaths.global, "utf8")), { enabled: false });
+    assert.deepEqual(JSON.parse(fs.readFileSync(mPaths.project, "utf8")), { mode: "strict" });
+    assert.notEqual(persisted.snapshot.globalHash, dryLoad.snapshot.globalHash);
+    assert.notEqual(persisted.snapshot.projectHash, dryLoad.snapshot.projectHash);
+
+    // 4. Subsequent load({ persistMigration: true }) reports migratedScopes: []
+    const secondLoad = await mStore.load({ trustedProject: true, persistMigration: true });
+    assert.deepEqual(secondLoad.migratedScopes, []);
+    assert.equal(secondLoad.snapshot.globalHash, persisted.snapshot.globalHash);
+    assert.equal(secondLoad.snapshot.projectHash, persisted.snapshot.projectHash);
+
+    // 5. Migrated values all equal to defaults -> file deleted via deleteWhenEmpty: true
+    const cleanRoot = makeTempDir();
+    const cleanStore = createSettingsStore(migrateSchema, {
+      agentDir: path.join(cleanRoot, "agent"),
+      cwd: path.join(cleanRoot, "repo"),
+    });
+    const cleanGlobalPath = cleanStore.getPaths().global;
+    fs.mkdirSync(path.dirname(cleanGlobalPath), { recursive: true });
+    fs.writeFileSync(cleanGlobalPath, JSON.stringify({ legacyFlag: true }), "utf8");
+
+    const cleanLoaded = await cleanStore.load({ persistMigration: true });
+    assert.deepEqual(cleanLoaded.migratedScopes, ["global"]);
+    assert.equal(fs.existsSync(cleanGlobalPath), false);
+    assert.equal(cleanLoaded.snapshot.globalHash, null);
+    assert.deepEqual((await cleanStore.load({ persistMigration: true })).migratedScopes, []);
   });
 });
 

@@ -508,16 +508,17 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     const showLegend = isMultiScope && maxLines >= 12;
 
     const selectedRow = rows[this.selectedIndex];
-    const helpInfo = this.getHelpText(selectedRow);
-    const maxHelpLines = maxLines >= 15 && helpInfo.lines > 1 ? 2 : maxLines >= 10 ? 1 : 0;
+    const helpInfo = this.getHelpText(selectedRow, innerWidth);
+    const helpCap = maxLines >= 20 ? 3 : maxLines >= 14 ? 2 : maxLines >= 10 ? 1 : 0;
+    let maxHelpLines = Math.min(helpCap, helpInfo.lines);
 
-    // Chrome: top(1) + header(1) + tabs(0|1) + divider(0|1) + help(0..2) + legend(0|1) + footer(1) + bottom(1)
-    let fixedChrome = 4 + (hasTabs ? 1 : 0) + (showDivider ? 1 : 0) + (showLegend ? 1 : 0) + maxHelpLines;
+    // Chrome: top(1) + header(1) + tabs(0|1) + divider(0|1) + help(0..3) + legend(0|1) + footer(1) + bottom(1)
+    const baseChrome = 4 + (hasTabs ? 1 : 0) + (showDivider ? 1 : 0) + (showLegend ? 1 : 0);
     // Guarantee at least 2 body rows when possible.
-    while (maxLines - fixedChrome < 2 && maxHelpLines > 0) {
-      fixedChrome--;
-      break;
+    while (maxLines - (baseChrome + maxHelpLines) < 2 && maxHelpLines > 0) {
+      maxHelpLines--;
     }
+    const fixedChrome = baseChrome + maxHelpLines;
     const bodyMaxRows = Math.max(1, maxLines - fixedChrome);
     this.lastBodyMaxRows = bodyMaxRows;
 
@@ -660,8 +661,8 @@ export class SettingsDialogComponent<TFields extends FieldMap>
 
     const { key, def, disabled } = row;
     const value = this.draftValues[key];
-    const formatted = schema.formatFieldValue(key, value);
-    const tone = schema.getFieldTone(key, value);
+    const formatted = schema.formatFieldValue(key, value, this.draftValues);
+    const tone = schema.getFieldTone(key, value, this.draftValues);
 
     const labBadge = def.experimental ? ` ${theme.fg("warning", "[lab]")}` : "";
     const dirtyMarker =
@@ -702,9 +703,12 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     return `${prefix}${clippedLabel}${provPart}${" ".repeat(padRight)}${clippedValue}`;
   }
 
-  private getHelpText(selectedRow: RootRow<TFields> | undefined): {
+  private getHelpText(
+    selectedRow: RootRow<TFields> | undefined,
+    innerWidth: number,
+  ): {
     lines: number;
-    render: (innerWidth: number, maxRows: number) => string[];
+    render: (width: number, maxRows: number) => string[];
   } {
     const { theme } = this.options;
     let text = "";
@@ -721,7 +725,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
               ? "success"
               : "muted";
     } else if (selectedRow?.kind === "field") {
-      text = selectedRow.def.description ?? "";
+      text = this.options.schema.getFieldDescription(selectedRow.key, this.draftValues) ?? "";
     } else if (selectedRow?.kind === "scope") {
       text = this.loadedState.trustedProject
         ? "Choose whether edits write to your user-global file or this project."
@@ -734,12 +738,12 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       return { lines: 0, render: () => [] };
     }
 
-    const approxLines = text.length > 60 ? 2 : 1;
+    const wrapped = wrapTextWithAnsi(text, innerWidth);
     return {
-      lines: approxLines,
-      render: (innerWidth: number, maxRows: number) => {
-        const wrapped = wrapTextWithAnsi(text, innerWidth).slice(0, maxRows);
-        return wrapped.map((line) => fitToWidth(theme.fg(color, line), innerWidth));
+      lines: wrapped.length,
+      render: (width: number, maxRows: number) => {
+        const target = width === innerWidth ? wrapped : wrapTextWithAnsi(text, width);
+        return target.slice(0, maxRows).map((line) => fitToWidth(theme.fg(color, line), width));
       },
     };
   }
@@ -1204,7 +1208,11 @@ export class SettingsDialogComponent<TFields extends FieldMap>
         this.openNumberRoute(key, def, Number(currentValue));
         break;
       case "model":
-        this.openModelRoute(key, def, (currentValue as ModelSelection | null) ?? null);
+        this.openModelRoute(
+          key,
+          def,
+          (currentValue as ModelSelection | string | null) ?? null,
+        );
         break;
       case "custom":
         this.openCustomRoute(key, def, currentValue);
@@ -1229,7 +1237,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
 
     const route = new SelectRoute({
       title: def.label,
-      description: def.description,
+      description: this.options.schema.getFieldDescription(key, this.draftValues),
       options: def.options,
       currentValue,
       theme: this.options.theme,
@@ -1254,7 +1262,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     const resolvedOptions = typeof def.options === "function" ? def.options() : def.options;
     const route = new MultiSelectRoute({
       title: def.label,
-      description: def.description,
+      description: this.options.schema.getFieldDescription(key, this.draftValues),
       options: resolvedOptions,
       initialValues: currentValues,
       minItems: def.minItems,
@@ -1288,7 +1296,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
   ): void {
     const route = new TextInputRoute({
       title: def.label,
-      description: def.description,
+      description: this.options.schema.getFieldDescription(key, this.draftValues),
       initialValue: currentValue,
       placeholder: def.placeholder,
       multiline: def.multiline,
@@ -1321,7 +1329,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     const unitSuffix = def.unit ? ` (${def.unit})` : "";
     const route = new TextInputRoute({
       title: `${def.label}${unitSuffix}`,
-      description: def.description,
+      description: this.options.schema.getFieldDescription(key, this.draftValues),
       initialValue: Number.isFinite(currentValue) ? String(currentValue) : "",
       placeholder: def.placeholder ?? "Enter a number",
       multiline: false,
@@ -1357,8 +1365,8 @@ export class SettingsDialogComponent<TFields extends FieldMap>
 
   private openModelRoute(
     key: keyof TFields & string,
-    def: ModelFieldDef<boolean, Record<string, unknown>>,
-    currentValue: ModelSelection | null,
+    def: ModelFieldDef<boolean, Record<string, unknown>, boolean>,
+    currentValue: ModelSelection | string | null,
   ): void {
     const resolvedAvailable =
       def.models !== undefined
@@ -1378,12 +1386,22 @@ export class SettingsDialogComponent<TFields extends FieldMap>
           ? this.options.scopedModels()
           : (this.options.scopedModels ?? []);
 
-    const route = new ModelPickerRoute({
+    const onSelect = (next: ModelSelection | string | null) => {
+      const checked = this.options.schema.validateField(key, next);
+      if (!checked.ok) {
+        this.statusBanner = { text: checked.error, tone: "error" };
+        this.popRoute();
+        return;
+      }
+      this.popRoute();
+      this.commitFieldValue(key, checked.value);
+    };
+
+    const commonOptions = {
       title: def.label,
-      description: def.description,
+      description: this.options.schema.getFieldDescription(key, this.draftValues),
       availableModels: resolvedAvailable,
       scopedModels: resolvedScoped,
-      currentValue: currentValue ? cloneValue(currentValue) : null,
       allowClear: def.allowClear,
       emptyLabel: def.emptyLabel,
       emptyDescription: def.emptyDescription,
@@ -1393,20 +1411,28 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       theme: this.options.theme,
       keybindings: this.options.keybindings,
       getMaxHeight: () => this.lastSubrouteBodyBudget,
-      onSelect: (next) => {
-        const checked = this.options.schema.validateField(key, next);
-        if (!checked.ok) {
-          this.statusBanner = { text: checked.error, tone: "error" };
-          this.popRoute();
-          return;
-        }
-        this.popRoute();
-        this.commitFieldValue(key, checked.value);
-      },
       onCancel: () => {
         this.popRoute();
       },
-    });
+    };
+
+    const route =
+      def.includeThinking === false
+        ? new ModelPickerRoute({
+            ...commonOptions,
+            includeThinking: false,
+            currentValue: typeof currentValue === "string" ? currentValue : null,
+            onSelect,
+          })
+        : new ModelPickerRoute({
+            ...commonOptions,
+            includeThinking: true,
+            currentValue:
+              currentValue && typeof currentValue === "object"
+                ? cloneValue(currentValue)
+                : null,
+            onSelect,
+          });
     this.pushRoute(def.label, route);
   }
 

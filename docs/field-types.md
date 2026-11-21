@@ -14,13 +14,13 @@ Every field builder accepts these base options (`FieldBase<T, TValues>`):
 | :--- | :--- | :--- |
 | `tab` | `string` | Tab ID from `defineSettings({ tabs })`. Defaults to the first tab (or `"general"` if `tabs` is omitted). Unknown tab IDs throw at schema definition time. |
 | `label` | `string` | Human-readable label shown in the row list and RPC menu. |
-| `description` | `string` | Help text shown in the bottom help area when the row is selected, and in sub-route headers. |
+| `description` | `string \| ((values: Readonly<TValues>) => string)` | Help text shown in the bottom help area when the row is selected, and in sub-route headers. For `field.enum`, if omitted, falls back to the currently selected option's `description`. |
 | `default` | `T` | Default value used when neither Global nor Project overrides the key. |
 | `experimental` | `boolean` | When `true`, renders a warning-colored `[lab]` badge next to the field label. |
 | `disabled` | `boolean \| ((values: Readonly<TValues>) => boolean)` | Dims and skips the row in navigation; blocks editing in both TUI and RPC. |
 | `visibleWhen` | `(values: Readonly<TValues>) => boolean` | Dynamically hides or shows the field based on current draft values. |
-| `format` | `(value: T) => string` | Custom display formatter for the row's right-hand value column and RPC menu. |
-| `tone` | `ValueTone \| ((value: T) => ValueTone)` | Theme color hint for the rendered value: `"default"`, `"accent"`, `"warn"`, `"error"`, `"success"`, or `"muted"`. |
+| `format` | `(value: T, values?: Readonly<TValues>) => string` | Custom display formatter for the row's right-hand value column and RPC menu. Receives current draft `values` as an optional second argument. |
+| `tone` | `ValueTone \| ((value: T, values?: Readonly<TValues>) => ValueTone)` | Theme color hint for the rendered value: `"default"`, `"accent"`, `"warn"`, `"error"`, `"success"`, or `"muted"`. Function form receives current draft `values` as an optional second argument. |
 | `scopes` | `readonly ("global" \| "project")[]` | Restricts which scopes may persist or edit this field. Disallowed keys in a scope file are ignored with a warning on load and skipped during diff/save. |
 
 Example using common options:
@@ -261,20 +261,23 @@ const workers = field.integer({
 
 ## 6. `field.model`
 
-First-class two-step Pi model + thinking level picker.
+First-class Pi model picker, supporting both two-step model + thinking level selection (`includeThinking: true`, default) and one-step model-only selection (`includeThinking: false`).
 
 - **TypeScript type:**
-  - `ModelSelection` (`{ readonly model: string; readonly thinkingLevel: ModelThinkingLevel }`) when `default` is a `ModelSelection` and `allowClear` is not `true`.
-  - `ModelSelection | null` when `default: null` (automatically enables `allowClear: true`) or `allowClear: true`.
-- **Saved value:** Stores both `model` (canonical `"provider/model-id"` string, preserving nested slashes/colons such as `"openrouter/qwen/qwen3-coder:exacto"`) and `thinkingLevel` (`"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`).
+  - When `includeThinking: true` *(default)*: `ModelSelection` (`{ readonly model: string; readonly thinkingLevel: ModelThinkingLevel }`), or `ModelSelection | null` when `default: null` (automatically enables `allowClear: true`) or `allowClear: true`.
+  - When `includeThinking: false`: `string` (`"provider/model-id"`), or `string | null` when `default: null` or `allowClear: true`.
+- **Saved value:**
+  - When `includeThinking: true` *(default)*: stores both `model` (canonical `"provider/model-id"` string, preserving nested slashes/colons such as `"openrouter/qwen/qwen3-coder:exacto"`) and `thinkingLevel` (`"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`).
+  - When `includeThinking: false`: stores only the canonical `"provider/model-id"` string (or `null` when cleared).
 - **Automatic Pi integration:** `openSettingsDialog(ctx, { schema })` automatically feeds `ctx.modelRegistry.getAvailable()` and `ctx.scopedModels` into the picker — no extra wiring needed.
-- **Two-step TUI interaction (`ModelPickerRoute`):**
-  1. **Step 1 (Select model):** Fuzzy search over provider, model ID, and model name; toggle between **Scoped** models and **All** available models via `Tab` or clicking `[Scoped (N)]` / `[All (M)]`. When `allowClear: true`, includes a clear row at the top to reset to `null`.
-  2. **Step 2 (Thinking level):** Lists the thinking levels supported by the chosen model (`off` only for non-reasoning models; respects `thinkingLevelMap` for `xhigh`/`max`/disabled levels), highlights the current/scoped thinking level, and supports `Esc` / clicking `[← Models]` to return to Step 1.
-- **Default formatting & tone:** Displays `"provider/model-id (thinkingLevel)"` (`"accent"`), or `emptyLabel ?? "None"` (`"muted"`) when `null`.
+- **TUI & RPC interaction (`ModelPickerRoute` / RPC):**
+  1. **Step 1 (Select model):** Fuzzy search over provider, model ID, and model name; toggle between **Scoped** models and **All** available models via `Tab` or clicking `[Scoped (N)]` / `[All (M)]`. When `allowClear: true`, includes a clear row at the top to reset to `null`. When `includeThinking: false`, selecting a model in Step 1 commits `"provider/model-id"` immediately in 1 step.
+  2. **Step 2 (Thinking level, when `includeThinking !== false`):** Lists the thinking levels supported by the chosen model (`off` only for non-reasoning models; respects `thinkingLevelMap` for `xhigh`/`max`/disabled levels), highlights the current/scoped thinking level, and supports `Esc` / clicking `[← Models]` to return to Step 1.
+- **Default formatting & tone:** Displays `"provider/model-id (thinkingLevel)"` (`"accent"`) for `ModelSelection`, `"provider/model-id"` (`"accent"`) for `string`, or `emptyLabel ?? "None"` (`"muted"`) when `null`.
 
 | Specific Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
+| `includeThinking` | `boolean` | `true` | When `true`, prompts for both model and thinking level (`ModelSelection`). When `false`, runs in 1-step model-only mode and persists a `"provider/model-id"` string (or `null` when `allowClear: true`). |
 | `allowClear` | `boolean` | `true` when `default: null`, else `false` | Allows clearing the selection to `null` (skips Step 2). |
 | `emptyLabel` | `string` | `"None"` | Display text when `null` and label for the clear row. |
 | `emptyDescription` | `string` | `"Clear model selection"` | Description shown on the clear row in the picker. |

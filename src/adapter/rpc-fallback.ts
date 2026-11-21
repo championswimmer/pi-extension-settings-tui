@@ -357,11 +357,11 @@ async function editModelField<TFields extends FieldMap>(
   ctx: ExtensionContext,
   schema: SettingsSchema<TFields>,
   key: keyof TFields & string,
-  def: ModelFieldDef<boolean, any>,
-  currentValue: ModelSelection | null,
+  def: ModelFieldDef<boolean, any, boolean>,
+  currentValue: ModelSelection | string | null,
   dialogOpts: ExtensionUIDialogOptions | undefined,
   catalogOptions?: Pick<OpenSettingsDialogOptions<TFields>, "availableModels" | "scopedModels">,
-): Promise<ModelSelection | null | undefined> {
+): Promise<ModelSelection | string | null | undefined> {
   const rawAvailable =
     def.models !== undefined
       ? typeof def.models === "function"
@@ -464,11 +464,12 @@ async function editModelField<TFields extends FieldMap>(
     (a, b) => a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id),
   );
 
-  if (currentValue && !byIdentity.has(currentValue.model)) {
-    const parsed = parseModelIdentity(currentValue.model);
+  const currentIdentity = typeof currentValue === "string" ? currentValue : currentValue?.model;
+  if (currentIdentity && !byIdentity.has(currentIdentity)) {
+    const parsed = parseModelIdentity(currentIdentity);
     if (parsed) {
       allList.unshift({
-        identity: currentValue.model,
+        identity: currentIdentity,
         provider: parsed.provider,
         id: parsed.id,
         name: "unavailable",
@@ -529,7 +530,7 @@ async function editModelField<TFields extends FieldMap>(
     }
 
     for (const model of filtered) {
-      const currentBadge = currentValue?.model === model.identity ? " (current)" : "";
+      const currentBadge = currentIdentity === model.identity ? " (current)" : "";
       const nameSuffix = model.name && model.name !== model.id ? ` — ${model.name}` : "";
       let itemLabel = `${model.identity}${nameSuffix}${currentBadge}`;
       if (labelToAction.has(itemLabel)) {
@@ -539,8 +540,9 @@ async function editModelField<TFields extends FieldMap>(
       options.push(itemLabel);
     }
 
+    const stepPrefix = def.includeThinking === false ? "" : "Step 1/2: ";
     const choice = await ctx.ui.select(
-      `${def.label} — Step 1/2: Select model (${scope === "scoped" ? "Scoped" : "All"})`,
+      `${def.label} — ${stepPrefix}Select model (${scope === "scoped" ? "Scoped" : "All"})`,
       options,
       dialogOpts,
     );
@@ -575,13 +577,25 @@ async function editModelField<TFields extends FieldMap>(
       return null;
     }
 
+    if (def.includeThinking === false) {
+      const validation = schema.validateField(key, picked.model.identity);
+      if (!validation.ok) {
+        ctx.ui.notify(validation.error, "warning");
+        continue;
+      }
+      return validation.value as string;
+    }
+
     // Step 2: Pick thinking level for the chosen model
     const levels = getSupportedThinkingLevelsForModel(picked.model, def.thinkingLevels);
     const levelLabelToValue = new Map<string, ModelThinkingLevel>();
     const levelOptions: string[] = [];
     for (const level of levels) {
       const currentLevelMark =
-        currentValue?.model === picked.model.identity && currentValue.thinkingLevel === level
+        typeof currentValue === "object" &&
+        currentValue !== null &&
+        currentValue.model === picked.model.identity &&
+        currentValue.thinkingLevel === level
           ? " (current)"
           : "";
       const scopedMark = picked.model.scopedThinkingLevel === level ? " · scoped" : "";
@@ -726,6 +740,7 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
       const formatted = schema.formatFieldValue(
         key,
         draft[key] as InferSettingsValues<TFields>[typeof key],
+        draft,
       );
       const provenance = formatProvenanceBadge(currentLoaded.provenance[key] ?? "default");
       const modifiedMark = saveMode === "draft" && !deepEqual(draft[key], currentLoaded.effective[key])
@@ -1000,7 +1015,7 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
             schema,
             key,
             def,
-            (currentValue as ModelSelection | null) ?? null,
+            (currentValue as ModelSelection | string | null) ?? null,
             dialogOpts,
             options,
           );

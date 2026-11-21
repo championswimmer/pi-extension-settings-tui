@@ -75,6 +75,9 @@ function formatDefaultFieldValue(def: AnyFieldDef, value: unknown): string {
       if (value === null || value === undefined) {
         return def.emptyLabel ?? "None";
       }
+      if (typeof value === "string") {
+        return value.length === 0 ? (def.emptyLabel ?? "None") : value;
+      }
       if (
         typeof value === "object" &&
         "model" in value &&
@@ -323,16 +326,42 @@ export function defineSettings<TFields extends FieldMap>(
       return diff as Partial<InferSettingsValues<TFields>>;
     },
 
+    getFieldDescription<K extends keyof TFields & string>(
+      key: K,
+      values?: Readonly<InferSettingsValues<TFields>>,
+    ): string | undefined {
+      if (!Object.prototype.hasOwnProperty.call(config.fields, key)) {
+        return undefined;
+      }
+      const def = config.fields[key]!;
+      const resolvedValues = values ?? defaults;
+      if (typeof def.description === "function") {
+        return (def.description as (vals: Readonly<Record<string, unknown>>) => string)(
+          resolvedValues,
+        );
+      }
+      if (typeof def.description === "string") {
+        return def.description;
+      }
+      if (def.kind === "enum") {
+        const currentValue = resolvedValues[key];
+        const opt = def.options.find((o) => o.value === currentValue);
+        return opt?.description;
+      }
+      return undefined;
+    },
+
     formatFieldValue<K extends keyof TFields & string>(
       key: K,
       value: InferSettingsValues<TFields>[K],
+      values?: Readonly<InferSettingsValues<TFields>>,
     ): string {
       if (!Object.prototype.hasOwnProperty.call(config.fields, key)) {
         return String(value ?? "");
       }
       const def = config.fields[key]!;
       if (def.format) {
-        return (def.format as (v: unknown) => string)(value);
+        return (def.format as (v: unknown, vals?: unknown) => string)(value, values);
       }
       return formatDefaultFieldValue(def, value);
     },
@@ -340,6 +369,7 @@ export function defineSettings<TFields extends FieldMap>(
     getFieldTone<K extends keyof TFields & string>(
       key: K,
       value: InferSettingsValues<TFields>[K],
+      values?: Readonly<InferSettingsValues<TFields>>,
     ): ValueTone {
       if (!Object.prototype.hasOwnProperty.call(config.fields, key)) {
         return "default";
@@ -347,7 +377,7 @@ export function defineSettings<TFields extends FieldMap>(
       const def = config.fields[key]!;
       if (def.tone !== undefined) {
         return typeof def.tone === "function"
-          ? (def.tone as (v: unknown) => ValueTone)(value)
+          ? (def.tone as (v: unknown, vals?: unknown) => ValueTone)(value, values)
           : def.tone;
       }
       return getDefaultFieldTone(def, value);

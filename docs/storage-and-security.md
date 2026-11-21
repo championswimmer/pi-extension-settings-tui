@@ -272,6 +272,11 @@ Load pipeline order inside `SettingsStore.load()`:
 5. Run `schema.validatePartial(raw)` to sanitize values and warn on unknown/invalid keys.
 6. Filter out any fields whose `scopes` array excludes `scope`.
 
+### Tracking & Persisting Migrations
+
+- `LoadedSettings.migratedScopes`: `readonly SettingsScope[]` listing the scopes (`"global"` and/or `"project"`) whose raw data changed during `migrate(raw, scope)`.
+- `LoadSettingsOptions.persistMigration`: `boolean` *(default `false`)* — when `true`, `store.load({ persistMigration: true })` writes any migrated scope layers back to the `StorageAdapter` (checked against the pre-migration `expectedHash` so concurrent external edits are never overwritten) and refreshes `snapshot`.
+
 ---
 
 ## 5. Optimistic Concurrency (`ConcurrencyConflictError`)

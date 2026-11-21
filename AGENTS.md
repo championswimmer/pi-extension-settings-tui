@@ -62,7 +62,7 @@ pi-extension-settings-tui/
 │   │   │   ├── text-input-route.ts    # Input (single-line) & Editor (multiline, Ctrl+S)
 │   │   │   ├── select-route.ts        # Input + fuzzyFilter searchable picker
 │   │   │   ├── multi-select-route.ts  # Searchable checklist + collapsible groups
-│   │   │   └── model-picker-route.ts  # Two-step Pi model (Scoped/All + fuzzy) -> thinking level picker
+│   │   │   └── model-picker-route.ts  # 1- or 2-step Pi model (Scoped/All + fuzzy) -> optional thinking level picker
 │   │   └── index.ts
 │   └── adapter/
 │       ├── types.ts                   # OpenSettingsDialogOptions/Result

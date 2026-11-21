@@ -80,6 +80,7 @@ export interface LoadedSettings<TValues extends Record<string, unknown>> {
   readonly trustedProject: boolean;
   readonly paths: Partial<Record<SettingsScope, string>>;
   readonly snapshot: LayersSnapshot;
+  readonly migratedScopes: readonly SettingsScope[];
 }
 
 export interface SaveSettingsOptions {
@@ -98,6 +99,7 @@ export interface SaveSettingsResult<TValues extends Record<string, unknown>> {
 
 export interface LoadSettingsOptions {
   readonly trustedProject?: boolean;
+  readonly persistMigration?: boolean;
 }
 
 export interface JsonFileStorageOptions {

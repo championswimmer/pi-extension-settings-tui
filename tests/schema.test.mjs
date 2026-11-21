@@ -794,3 +794,169 @@ test("model field helpers, validation, formatting, tone, and layered diffing", (
     },
   );
 });
+
+test("getFieldDescription supports dynamic descriptions and enum option fallback", () => {
+  const schema = defineSettings({
+    id: "dynamic-desc",
+    title: "Dynamic Desc",
+    fields: {
+      enabled: field.boolean({
+        label: "Enabled",
+        default: true,
+      }),
+      mode: field.enum({
+        label: "Mode",
+        default: "fast",
+        options: [
+          { value: "fast", label: "Fast", description: "Prioritize speed" },
+          { value: "strict", label: "Strict", description: "Full validation" },
+          { value: "plain", label: "Plain" },
+        ],
+      }),
+      threshold: field.integer({
+        label: "Threshold",
+        default: 10,
+        description: (values) =>
+          values.enabled ? `Active threshold: ${values.threshold}` : "Disabled",
+      }),
+    },
+  });
+
+  // Uses schema defaults when values omitted
+  assert.equal(schema.getFieldDescription("threshold"), "Active threshold: 10");
+  // Uses provided draft values
+  assert.equal(
+    schema.getFieldDescription("threshold", { enabled: false, mode: "fast", threshold: 25 }),
+    "Disabled",
+  );
+  assert.equal(
+    schema.getFieldDescription("threshold", { enabled: true, mode: "fast", threshold: 25 }),
+    "Active threshold: 25",
+  );
+
+  // Enum option description fallback when def.description is omitted
+  assert.equal(schema.getFieldDescription("mode"), "Prioritize speed");
+  assert.equal(
+    schema.getFieldDescription("mode", { enabled: true, mode: "strict", threshold: 10 }),
+    "Full validation",
+  );
+  assert.equal(
+    schema.getFieldDescription("mode", { enabled: true, mode: "plain", threshold: 10 }),
+    undefined,
+  );
+  assert.equal(schema.getFieldDescription("enabled"), undefined);
+  assert.equal(schema.getFieldDescription("nonexistent"), undefined);
+});
+
+test("draft-aware format(value, values) and tone(value, values)", () => {
+  const schema = defineSettings({
+    id: "draft-fmt-tone",
+    title: "Draft Format & Tone",
+    fields: {
+      enabled: field.boolean({ label: "Enabled", default: true }),
+      limit: field.integer({
+        label: "Limit",
+        default: 5,
+        format: (val, values) => (values?.enabled === false ? `${val} (inactive)` : `${val} active`),
+        tone: (val, values) => {
+          if (values?.enabled === false) return "muted";
+          return val > 10 ? "warn" : "success";
+        },
+      }),
+    },
+  });
+
+  assert.equal(schema.formatFieldValue("limit", 5, { enabled: true, limit: 5 }), "5 active");
+  assert.equal(schema.formatFieldValue("limit", 5, { enabled: false, limit: 5 }), "5 (inactive)");
+  assert.equal(schema.getFieldTone("limit", 5, { enabled: true, limit: 5 }), "success");
+  assert.equal(schema.getFieldTone("limit", 15, { enabled: true, limit: 15 }), "warn");
+  assert.equal(schema.getFieldTone("limit", 15, { enabled: false, limit: 15 }), "muted");
+});
+
+test("field.model with includeThinking: false validates, formats, and diffs string model IDs", () => {
+  const nullableModelId = field.model({
+    label: "Fast Model",
+    includeThinking: false,
+    default: null,
+    emptyLabel: "Auto",
+  });
+  assert.equal(nullableModelId.includeThinking, false);
+  assert.equal(nullableModelId.allowClear, true);
+
+  assert.deepEqual(validateFieldValue(nullableModelId, null), { ok: true, value: null });
+  assert.deepEqual(validateFieldValue(nullableModelId, "  \x1b[32mopenai/gpt-4o\x1b[0m  "), {
+    ok: true,
+    value: "openai/gpt-4o",
+  });
+  assert.deepEqual(validateFieldValue(nullableModelId, "openrouter/qwen/qwen3-coder:exacto"), {
+    ok: true,
+    value: "openrouter/qwen/qwen3-coder:exacto",
+  });
+  assert.equal(
+    validateFieldValue(nullableModelId, { model: "openai/gpt-4o", thinkingLevel: "low" }).ok,
+    false,
+  );
+  assert.equal(validateFieldValue(nullableModelId, "no-slash").ok, false);
+  assert.equal(validateFieldValue(nullableModelId, "/leading").ok, false);
+  assert.equal(validateFieldValue(nullableModelId, "trailing/").ok, false);
+
+  const requiredModelId = field.model({
+    label: "Primary Model",
+    includeThinking: false,
+    default: "openai/gpt-4o",
+  });
+  assert.equal(requiredModelId.includeThinking, false);
+  assert.equal(requiredModelId.allowClear, false);
+  assert.equal(validateFieldValue(requiredModelId, null).ok, false);
+  assert.deepEqual(validateFieldValue(requiredModelId, "anthropic/claude-sonnet-4-5"), {
+    ok: true,
+    value: "anthropic/claude-sonnet-4-5",
+  });
+  assert.equal(
+    validateFieldValue(requiredModelId, { model: "openai/gpt-4o", thinkingLevel: "off" }).ok,
+    false,
+  );
+
+  const schema = defineSettings({
+    id: "model-id-only",
+    title: "Model ID Only",
+    fields: {
+      fastModel: nullableModelId,
+      primaryModel: requiredModelId,
+    },
+  });
+
+  assert.equal(schema.formatFieldValue("fastModel", null), "Auto");
+  assert.equal(schema.getFieldTone("fastModel", null), "muted");
+  assert.equal(schema.formatFieldValue("fastModel", "openai/gpt-4o"), "openai/gpt-4o");
+  assert.equal(schema.getFieldTone("fastModel", "openai/gpt-4o"), "accent");
+  assert.equal(
+    schema.formatFieldValue("primaryModel", "openrouter/qwen/qwen3-coder:exacto"),
+    "openrouter/qwen/qwen3-coder:exacto",
+  );
+
+  assert.deepEqual(
+    schema.diffForScope(
+      { fastModel: null, primaryModel: "openai/gpt-4o" },
+      "global",
+      { global: {}, project: {} },
+    ),
+    {},
+  );
+  assert.deepEqual(
+    schema.diffForScope(
+      { fastModel: "openai/gpt-4o-mini", primaryModel: "anthropic/claude-sonnet-4-5" },
+      "global",
+      { global: {}, project: {} },
+    ),
+    { fastModel: "openai/gpt-4o-mini", primaryModel: "anthropic/claude-sonnet-4-5" },
+  );
+  assert.deepEqual(
+    schema.diffForScope(
+      { fastModel: "openai/gpt-4o-mini", primaryModel: "openai/gpt-4o" },
+      "project",
+      { global: { fastModel: "openai/gpt-4o-mini" }, project: {} },
+    ),
+    {},
+  );
+});

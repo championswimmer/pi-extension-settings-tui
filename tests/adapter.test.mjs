@@ -1037,3 +1037,184 @@ test("openSettingsDialog auto-discovers Pi ctx.modelRegistry and ctx.scopedModel
     thinkingLevel: "xhigh",
   });
 });
+
+test("RPC mode with field.model({ includeThinking: false }) selects model in 1 step and supports clearing", async () => {
+  const modelCatalog = [
+    {
+      provider: "anthropic",
+      id: "claude-sonnet-4-5",
+      name: "Claude Sonnet 4.5",
+      reasoning: true,
+    },
+    {
+      provider: "openai",
+      id: "gpt-5-mini",
+      name: "GPT-5 Mini",
+      reasoning: true,
+    },
+  ];
+  const scoped = [{ model: modelCatalog[0], thinkingLevel: "high" }];
+
+  const schema = defineSettings({
+    id: "model-only-rpc-test",
+    title: "Model Only RPC Test",
+    scopes: ["global"],
+    saveMode: "draft",
+    fields: {
+      modelOnly: field.model({
+        label: "Model only",
+        includeThinking: false,
+        default: null,
+        emptyLabel: "Inherit active",
+      }),
+    },
+  });
+
+  const adapter = createMemoryStorageAdapter();
+  const seenTitles = [];
+  const selectQueue = [
+    // Root menu -> Model only
+    (opts) => opts.find((o) => o.includes("Model only:")),
+    // 1-step model picker (no Step 1/2 prefix) -> pick anthropic/claude-sonnet-4-5
+    (opts) => opts.find((o) => o.includes("anthropic/claude-sonnet-4-5")),
+    // Root menu directly (no Step 2) -> Save changes
+    (opts) => opts.find((o) => o.startsWith("Save changes")),
+  ];
+
+  const { ctx } = createBaseContext({
+    mode: "rpc",
+    hasUI: true,
+    modelRegistry: { getAvailable: () => modelCatalog },
+    scopedModels: scoped,
+    ui: {
+      theme: createMockTheme(),
+      notify: () => {},
+      select: async (title, options) => {
+        seenTitles.push(title);
+        const next = selectQueue.shift();
+        assert.ok(next, `Unexpected RPC select: ${title}`);
+        return next(options);
+      },
+      input: async () => undefined,
+      editor: async () => undefined,
+      confirm: async () => true,
+      custom: async () => {
+        throw new Error("custom() must not be called in RPC mode");
+      },
+    },
+  });
+
+  const pickedResult = await openSettingsDialog(ctx, { schema, adapter });
+  assert.equal(selectQueue.length, 0);
+  assert.equal(pickedResult.saved, true);
+  assert.equal(pickedResult.values.modelOnly, "anthropic/claude-sonnet-4-5");
+  assert.deepEqual(seenTitles, [
+    "Model Only RPC Test",
+    "Model only — Select model (Scoped)",
+    "Model Only RPC Test",
+  ]);
+
+  // Re-open with persisted string value, verify "(current)" badge, then clear back to null
+  const clearSelectQueue = [
+    (opts) => opts.find((o) => o.includes("Model only: anthropic/claude-sonnet-4-5")),
+    (opts) => {
+      assert.ok(opts.some((o) => o.includes("anthropic/claude-sonnet-4-5") && o.includes("(current)")));
+      return opts.find((o) => o.startsWith("Inherit active —"));
+    },
+    (opts) => opts.find((o) => o.startsWith("Save changes")),
+  ];
+
+  const { ctx: clearCtx } = createBaseContext({
+    mode: "rpc",
+    hasUI: true,
+    modelRegistry: { getAvailable: () => modelCatalog },
+    scopedModels: scoped,
+    ui: {
+      theme: createMockTheme(),
+      notify: () => {},
+      select: async (title, options) => {
+        const next = clearSelectQueue.shift();
+        assert.ok(next, `Unexpected RPC select: ${title}`);
+        return next(options);
+      },
+      input: async () => undefined,
+      editor: async () => undefined,
+      confirm: async () => true,
+      custom: async () => {
+        throw new Error("custom() must not be called in RPC mode");
+      },
+    },
+  });
+
+  const clearedResult = await openSettingsDialog(clearCtx, { schema, adapter });
+  assert.equal(clearSelectQueue.length, 0);
+  assert.equal(clearedResult.saved, true);
+  assert.equal(clearedResult.values.modelOnly, null);
+});
+
+test("RPC menu passes draft values to format(value, values)", async () => {
+  const schema = defineSettings({
+    id: "rpc-draft-format-test",
+    title: "RPC Draft Format Test",
+    scopes: ["global"],
+    saveMode: "draft",
+    fields: {
+      mode: field.enum({
+        label: "Mode",
+        default: "fast",
+        options: [
+          { value: "fast", label: "Fast" },
+          { value: "safe", label: "Safe" },
+        ],
+      }),
+      threshold: field.integer({
+        label: "Threshold",
+        default: 10,
+        format: (val, values) => `${val} (${values?.mode ?? "unknown"})`,
+      }),
+    },
+  });
+
+  const adapter = createMemoryStorageAdapter();
+  const rootMenus = [];
+  const selectQueue = [
+    // 1. Initial root menu: check Threshold: 10 (fast), pick Mode
+    (opts) => {
+      rootMenus.push(opts);
+      return opts.find((o) => o.includes("Mode:"));
+    },
+    // 2. Pick Safe
+    (opts) => opts.find((o) => o === "Safe"),
+    // 3. Updated root menu: check Threshold: 10 (safe), then Discard & close
+    (opts) => {
+      rootMenus.push(opts);
+      return opts.find((o) => o === "Discard & close");
+    },
+  ];
+
+  const { ctx } = createBaseContext({
+    mode: "rpc",
+    hasUI: true,
+    ui: {
+      theme: createMockTheme(),
+      notify: () => {},
+      select: async (_title, options) => {
+        const next = selectQueue.shift();
+        assert.ok(next, `Unexpected RPC select: ${_title}`);
+        return next(options);
+      },
+      input: async () => undefined,
+      editor: async () => undefined,
+      confirm: async () => true,
+      custom: async () => {
+        throw new Error("custom() must not be called in RPC mode");
+      },
+    },
+  });
+
+  const result = await openSettingsDialog(ctx, { schema, adapter });
+  assert.equal(selectQueue.length, 0);
+  assert.equal(result.closedBy, "cancel");
+  assert.ok(rootMenus[0].some((o) => o.includes("Threshold: 10 (fast)")));
+  assert.ok(rootMenus[1].some((o) => o.includes("Threshold: 10 (safe)")));
+});

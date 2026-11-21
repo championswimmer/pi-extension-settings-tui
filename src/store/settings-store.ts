@@ -1,5 +1,6 @@
 import {
   cloneValue,
+  deepEqual,
   findSecretKeys,
   type FieldMap,
   type InferSettingsValues,
@@ -54,6 +55,7 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
       : { data: null, hash: null, exists: false };
 
     const warnings: string[] = [];
+    const migratedScopes: SettingsScope[] = [];
 
     const parseLayer = (
       readResult: LayerReadResult,
@@ -70,12 +72,15 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
 
       let raw = preClean.cleaned;
       if (this.schema.config.migrate) {
-        raw = this.schema.config.migrate(raw, scope);
+        raw = this.schema.config.migrate(cloneValue(preClean.cleaned), scope);
         const postMigrate = stripSecretKeys(raw);
         for (const keyPath of postMigrate.strippedKeys) {
           warnings.push(`Ignored secret key "${keyPath}" in ${scope} settings.`);
         }
         raw = postMigrate.cleaned;
+        if (!deepEqual(preClean.cleaned, postMigrate.cleaned)) {
+          migratedScopes.push(scope);
+        }
       }
 
       const validated = this.schema.validatePartial(raw);
@@ -110,9 +115,61 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
 
     const effective = this.schema.resolveEffective(layers, { includeProject });
     const provenance = this.schema.computeProvenance(layers, { includeProject });
+    let globalHash = globalRead.hash;
+    let projectHash = projectRead.hash;
+
+    if (options?.persistMigration === true && migratedScopes.length > 0) {
+      for (const scope of migratedScopes) {
+        if (scope === "project" && !includeProject) {
+          continue;
+        }
+        const effectiveForScope =
+          scope === "global"
+            ? this.schema.resolveEffective(layers, { includeProject: false })
+            : this.schema.resolveEffective(layers, { includeProject: true });
+        const rawDiff = this.schema.diffForScope(effectiveForScope, scope, layers);
+        const diff: Record<string, unknown> = {};
+        for (const key of Object.keys(rawDiff) as (keyof TFields & string)[]) {
+          const fieldDef = this.schema.fields[key];
+          if (fieldDef?.scopes && !fieldDef.scopes.includes(scope)) {
+            continue;
+          }
+          diff[key] = rawDiff[key];
+        }
+
+        const secretKeysInDiff = findSecretKeys(diff);
+        if (secretKeysInDiff.length > 0) {
+          warnings.push(
+            `Skipped persisting migrated ${scope} settings due to forbidden secret key(s): ${secretKeysInDiff.join(", ")}`,
+          );
+          continue;
+        }
+
+        const expectedHash = scope === "global" ? globalHash : projectHash;
+        try {
+          const writeResult = await this.adapter.writeLayer(scope, diff, {
+            expectedHash,
+          });
+          if (scope === "global") {
+            globalHash = writeResult.hash;
+          } else {
+            projectHash = writeResult.hash;
+          }
+        } catch (err) {
+          if (err instanceof ConcurrencyConflictError) {
+            warnings.push(
+              `Skipped persisting migrated ${scope} settings due to concurrency conflict.`,
+            );
+          } else {
+            throw err;
+          }
+        }
+      }
+    }
+
     const snapshot: LayersSnapshot = {
-      globalHash: globalRead.hash,
-      projectHash: projectRead.hash,
+      globalHash,
+      projectHash,
     };
 
     return {
@@ -123,6 +180,7 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
       trustedProject,
       paths: this.getPaths(),
       snapshot,
+      migratedScopes,
     };
   }
 

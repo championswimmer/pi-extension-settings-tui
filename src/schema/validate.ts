@@ -390,6 +390,20 @@ export function validateFieldValue(fieldDef: AnyFieldDef, raw: unknown): Validat
         return { ok: false, error: "A model selection is required" };
       }
 
+      if (fieldDef.includeThinking === false) {
+        if (typeof raw !== "string") {
+          return { ok: false, error: 'Model must be a "provider/model-id" string' };
+        }
+        const normalizedModel = stripControlChars(raw, false).trim();
+        if (!parseModelIdentity(normalizedModel)) {
+          return {
+            ok: false,
+            error: `Invalid model "${normalizedModel}". Expected "provider/model-id" format`,
+          };
+        }
+        return { ok: true, value: normalizedModel };
+      }
+
       if (!isPlainObject(raw)) {
         return {
           ok: false,

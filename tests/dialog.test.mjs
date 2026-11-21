@@ -11,7 +11,11 @@ import {
   createMemoryStorageAdapter,
   createSettingsStore,
 } from "../dist/store/index.js";
-import { SettingsDialogComponent } from "../dist/dialog/index.js";
+import {
+  ModelPickerRoute,
+  SelectRoute,
+  SettingsDialogComponent,
+} from "../dist/dialog/index.js";
 
 const KEY_UP = "\x1b[A";
 const KEY_DOWN = "\x1b[B";
@@ -1180,4 +1184,298 @@ test("13. ModelPickerRoute: two-step model -> thinking flow, fuzzy search, Scope
     const allLines = smallDialog.render(columns);
     assert.ok(allLines.some((l) => l.includes("offline-model")));
   }
+});
+
+test("14. Dynamic description(values) updates live and multi-line wrapped help text respects height budget", async () => {
+  const dynSchema = defineSettings({
+    id: "dyn-desc-test",
+    title: "Dynamic Help",
+    scopes: ["global"],
+    saveMode: "draft",
+    fields: {
+      enabled: field.boolean({
+        label: "Enabled",
+        description: "Master toggle for dynamic help.",
+        default: true,
+      }),
+      mode: field.enum({
+        label: "Mode",
+        default: "fast",
+        description: (values) =>
+          values.enabled
+            ? `Active mode is ${values.mode}: this is an intentionally long dynamic description that wraps across multiple lines inside the help area of the dialog.`
+            : "Feature is currently disabled so mode selection has no runtime effect until Enabled is turned back on.",
+        options: [
+          { value: "fast", label: "Fast" },
+          { value: "safe", label: "Safe" },
+          { value: "deep", label: "Deep" },
+          { value: "ultra", label: "Ultra" },
+        ],
+      }),
+    },
+  });
+
+  const makeDialog = async (rows, columns) => {
+    const adapter = createMemoryStorageAdapter();
+    const store = createSettingsStore(dynSchema, { adapter });
+    const initialState = await store.load({ trustedProject: true });
+    const tui = createMockTui({ rows, columns, mode: "fullscreen" });
+    const dialog = new SettingsDialogComponent({
+      schema: dynSchema,
+      store,
+      initialState,
+      tui,
+      theme: createMockTheme(),
+      keybindings: createMockKeybindings(),
+      done: () => {},
+    });
+    dialog.focused = true;
+    return dialog;
+  };
+
+  // At 60x30 (maxLines = 26 >= 20 -> helpCap = 3): wraps full 3-line dynamic description
+  const dTall = await makeDialog(30, 60);
+  dTall.navigateTo({ field: "mode" });
+  let lines = dTall.render(60);
+  assert.ok(lines.length <= 26);
+  for (const line of lines) assert.ok(visibleWidth(line) <= 60);
+  const joinedTall = lines.map((l) => stripTerminalSequences(l)).join("\n");
+  assert.ok(joinedTall.includes("Active mode is fast:"));
+  assert.ok(joinedTall.includes("help area of the dialog."));
+
+  // Toggle Enabled off -> dynamic description on Mode updates live in draft state
+  dTall.navigateTo({ field: "enabled" });
+  dTall.handleInput(" ");
+  dTall.navigateTo({ field: "mode" });
+  lines = dTall.render(60);
+  const joinedDisabled = lines.map((l) => stripTerminalSequences(l)).join("\n");
+  assert.ok(joinedDisabled.includes("Feature is currently disabled"));
+  assert.ok(!joinedDisabled.includes("Active mode is fast:"));
+
+  // Open SelectRoute for Mode -> sub-route receives resolved dynamic description string
+  dTall.handleInput(KEY_ENTER);
+  const subLines = dTall.render(60);
+  assert.ok(subLines.some((l) => stripTerminalSequences(l).includes("Feature is currently")));
+
+  // Tight terminal heights: rows=14 (maxLines=10, helpCap=1) & rows=12 (maxLines=8, helpCap=0)
+  for (const rows of [14, 12]) {
+    const dShort = await makeDialog(rows, 54);
+    dShort.navigateTo({ field: "mode" });
+    const shortLines = dShort.render(54);
+    const maxLines = Math.max(8, rows - 4);
+    assert.ok(shortLines.length <= maxLines, `Expected <= ${maxLines}, got ${shortLines.length}`);
+    for (const line of shortLines) {
+      assert.ok(visibleWidth(line) <= 54);
+    }
+    // At least 2 body rows remain visible
+    assert.ok(shortLines.some((l) => l.includes("Enabled")));
+    assert.ok(shortLines.some((l) => l.includes("Mode")));
+  }
+});
+
+test("15. Draft-aware format(val, values) and tone(val, values) update live on root rows", async () => {
+  const toneTheme = {
+    ...createMockTheme(),
+    fg: (color, text) => `<${color}>${text}</${color}>`,
+  };
+
+  const schema = defineSettings({
+    id: "draft-format-tone-test",
+    title: "Draft Format & Tone",
+    scopes: ["global"],
+    saveMode: "draft",
+    fields: {
+      enabled: field.boolean({
+        label: "Enabled",
+        default: true,
+      }),
+      limit: field.integer({
+        label: "Limit",
+        default: 10,
+        min: 1,
+        max: 100,
+        format: (val, values) => (values?.enabled ? `${val} active` : `${val} (paused)`),
+        tone: (_val, values) => (values?.enabled ? "success" : "warn"),
+      }),
+    },
+  });
+
+  const adapter = createMemoryStorageAdapter();
+  const store = createSettingsStore(schema, { adapter });
+  const initialState = await store.load({ trustedProject: true });
+  const tui = createMockTui({ rows: 24, columns: 80, mode: "fullscreen" });
+  const dialog = new SettingsDialogComponent({
+    schema,
+    store,
+    initialState,
+    tui,
+    theme: toneTheme,
+    keybindings: createMockKeybindings(),
+    done: () => {},
+  });
+  dialog.focused = true;
+
+  let lines = dialog.render(80);
+  let limitRow = lines.find((l) => stripTerminalSequences(l).includes("Limit"));
+  assert.ok(limitRow?.includes("<success>10 active</success>"));
+
+  // Toggle Enabled off in draft -> Limit row immediately updates format & tone
+  dialog.handleInput(" ");
+  lines = dialog.render(80);
+  limitRow = lines.find((l) => stripTerminalSequences(l).includes("Limit"));
+  assert.ok(limitRow?.includes("<warning>10 (paused)</warning>"));
+});
+
+test("16. SelectRoute renders full wrapped description preview for long option descriptions with mouse & height safety", async () => {
+  const longDesc =
+    "Prunes all tool results older than the configured retention window while preserving pinned assistant summaries.";
+  const selected = [];
+  const route = new SelectRoute({
+    title: "Strategy",
+    description: "Choose a pruning strategy.",
+    currentValue: "none",
+    theme: {
+      ...createMockTheme(),
+      fg: (color, text) => (color === "muted" ? `[muted:${text}]` : text),
+    },
+    keybindings: createMockKeybindings(),
+    getMaxHeight: () => 14,
+    options: [
+      { value: "none", label: "None", description: "Short" },
+      { value: "aggressive", label: "Aggressive Pruning Strategy", description: longDesc },
+      { value: "balanced", label: "Balanced", description: "Moderate retention" },
+      { value: "minimal", label: "Minimal", description: "Light touch" },
+    ],
+    onSelect: (val) => selected.push(val),
+    onCancel: () => {},
+  });
+  route.focused = true;
+
+  // Move to "aggressive" whose long description does not fit inline at width 72
+  route.handleInput(KEY_DOWN);
+  const lines = route.render(72);
+  assert.ok(lines.length <= 14);
+  for (const line of lines) {
+    assert.ok(visibleWidth(line) <= 72, `Line exceeded width 72: ${visibleWidth(line)}`);
+  }
+
+  // Full wrapped description appears in muted preview above the footer hint
+  const plainLines = lines.map((l) => stripTerminalSequences(l));
+  assert.ok(plainLines.some((l) => l.includes("[muted:") && l.includes("Prunes all tool results")));
+  assert.ok(plainLines.some((l) => l.includes("[muted:") && l.includes("pinned assistant summaries.")));
+  assert.ok(plainLines[plainLines.length - 1].includes("Enter select"));
+
+  // Mouse click on "Minimal" still hits the exact row y coordinate
+  const minPos = findTextPosition(lines, "Minimal");
+  assert.ok(minPos);
+  route.handleMouse(makeMouseEvent("press", { x: minPos.x - 1, y: minPos.y }));
+  route.handleMouse(makeMouseEvent("click", { x: minPos.x - 1, y: minPos.y, clickCount: 1 }));
+  assert.deepEqual(selected, ["minimal"]);
+});
+
+test("17. ModelPickerRoute & SettingsDialogComponent with includeThinking: false (1-step selection, clear, header/footer)", async () => {
+  const availableModels = [
+    { provider: "anthropic", id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", reasoning: true },
+    { provider: "openai", id: "gpt-5-mini", name: "GPT-5 Mini", reasoning: true },
+  ];
+
+  // Direct ModelPickerRoute with includeThinking: false
+  const directSelected = [];
+  const directRoute = new ModelPickerRoute({
+    title: "Summarizer Model",
+    includeThinking: false,
+    availableModels,
+    currentValue: "anthropic/claude-sonnet-4-5",
+    allowClear: true,
+    emptyLabel: "Inherit active",
+    theme: createMockTheme(),
+    keybindings: createMockKeybindings(),
+    onSelect: (val) => directSelected.push(val),
+    onCancel: () => {},
+  });
+  directRoute.focused = true;
+
+  // Wide header says "Select model" without "Step 1/2", footer says "Enter select"
+  const wideLines = directRoute.render(72);
+  assert.ok(wideLines[0].includes("Select model"));
+  assert.ok(!wideLines[0].includes("Step 1/2"));
+  assert.ok(wideLines[wideLines.length - 1].includes("Enter select"));
+  assert.ok(!wideLines[wideLines.length - 1].includes("Enter next"));
+
+  // Narrow (< 50) header says "Model" without "1/2 Model"
+  const narrowLines = directRoute.render(44);
+  assert.ok(narrowLines[0].includes("Model"));
+  assert.ok(!narrowLines[0].includes("1/2"));
+
+  // Clicking gpt-5-mini immediately commits "openai/gpt-5-mini" in 1 step (never enters thinking step)
+  const gptPos = findTextPosition(wideLines, "gpt-5-mini");
+  assert.ok(gptPos);
+  directRoute.handleMouse(makeMouseEvent("press", { x: gptPos.x - 1, y: gptPos.y }));
+  directRoute.handleMouse(makeMouseEvent("click", { x: gptPos.x - 1, y: gptPos.y, clickCount: 1 }));
+  assert.equal(directRoute.getStep(), "model");
+  assert.deepEqual(directSelected, ["openai/gpt-5-mini"]);
+
+  // SettingsDialogComponent integration with field.model({ includeThinking: false, allowClear: true })
+  const schema = defineSettings({
+    id: "model-only-dialog-test",
+    title: "Model Only Settings",
+    scopes: ["global"],
+    saveMode: "draft",
+    fields: {
+      summarizerModel: field.model({
+        label: "Summarizer model",
+        includeThinking: false,
+        allowClear: true,
+        default: null,
+        emptyLabel: "Active model",
+      }),
+    },
+  });
+
+  const adapter = createMemoryStorageAdapter();
+  const store = createSettingsStore(schema, { adapter });
+  const initialState = await store.load({ trustedProject: true });
+  const tui = createMockTui({ rows: 24, columns: 80, mode: "fullscreen" });
+  const results = [];
+
+  const dialog = new SettingsDialogComponent({
+    schema,
+    store,
+    initialState,
+    tui,
+    theme: createMockTheme(),
+    keybindings: createMockKeybindings(),
+    availableModels,
+    done: (res) => results.push(res),
+  });
+  dialog.focused = true;
+
+  // Open picker -> Move to claude-sonnet-4-5 -> Enter commits string directly
+  dialog.handleInput(KEY_ENTER);
+  let lines = dialog.render(80);
+  assert.ok(lines.some((l) => l.includes("Select model")));
+  assert.ok(!lines.some((l) => l.includes("Step 1/2")));
+
+  dialog.handleInput(KEY_DOWN); // skip clear row -> claude-sonnet-4-5
+  dialog.handleInput(KEY_ENTER);
+  lines = dialog.render(80);
+  assert.ok(!lines.some((l) => l.includes("Step 2/2")));
+  assert.ok(lines.some((l) => l.includes("anthropic/claude-sonnet-4-5")));
+
+  // Re-open picker -> select clear row -> commits null
+  dialog.handleInput(KEY_ENTER);
+  dialog.handleInput(KEY_UP); // move up to Active model (clear row)
+  dialog.handleInput(KEY_ENTER);
+  lines = dialog.render(80);
+  assert.ok(lines.some((l) => l.includes("Active model")));
+
+  // Re-select via Enter on gpt-5-mini and Ctrl+S save
+  dialog.handleInput(KEY_ENTER);
+  for (const ch of "gpt") dialog.handleInput(ch);
+  dialog.handleInput(KEY_ENTER);
+  dialog.handleInput(KEY_CTRL_S);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(results.length, 1);
+  assert.equal(results[0].saved, true);
+  assert.equal(results[0].values.summarizerModel, "openai/gpt-5-mini");
 });

@@ -117,6 +117,16 @@ export class SelectRoute<T extends string = string> implements DialogRouteCompon
     );
   }
 
+  private doesOptionDescriptionFitInline(opt: SelectRouteOption<T>, safeWidth: number): boolean {
+    if (!opt.description) return true;
+    if (safeWidth < 32) return false;
+    const prefixW = 4; // `${cursor} ${mark} `
+    const maxLabelW = Math.min(Math.floor(safeWidth * 0.55), Math.max(12, safeWidth - prefixW - 8));
+    const clippedLabel = truncateToWidth(opt.label, maxLabelW, "…", false);
+    const remaining = Math.max(0, safeWidth - prefixW - visibleWidth(clippedLabel) - 2);
+    return remaining >= 4 && visibleWidth(opt.description) <= remaining;
+  }
+
   render(width: number): string[] {
     this.tracker.clear();
     this.searchBounds = undefined;
@@ -134,7 +144,26 @@ export class SelectRoute<T extends string = string> implements DialogRouteCompon
 
     const showHint = maxHeight >= 6 ? 1 : 0;
     const searchHeight = 1;
-    const listMaxRows = Math.max(1, maxHeight - descLines.length - searchHeight - showHint);
+    const baseRemaining = maxHeight - descLines.length - searchHeight - showHint;
+
+    const highlightedOpt = this.filteredOptions[this.selectedIndex];
+    let previewLines: string[] = [];
+    if (
+      maxHeight >= 10 &&
+      highlightedOpt?.description &&
+      !this.doesOptionDescriptionFitInline(highlightedOpt, safeWidth)
+    ) {
+      const previewCap = maxHeight >= 14 ? 2 : 1;
+      const maxPreviewBudget = Math.max(0, baseRemaining - 2);
+      const previewCount = Math.min(previewCap, maxPreviewBudget);
+      if (previewCount > 0) {
+        previewLines = wrapTextWithAnsi(highlightedOpt.description, safeWidth)
+          .slice(0, previewCount)
+          .map((l) => fitToWidth(theme.fg("muted", l), safeWidth));
+      }
+    }
+
+    const listMaxRows = Math.max(1, baseRemaining - previewLines.length);
     this.lastListMaxRows = listMaxRows;
 
     const lines: string[] = [...descLines];
@@ -196,6 +225,12 @@ export class SelectRoute<T extends string = string> implements DialogRouteCompon
 
       if (win.belowCount > 0) {
         lines.push(renderScrollIndicator("down", win.belowCount, safeWidth, theme));
+      }
+    }
+
+    for (const previewLine of previewLines) {
+      if (lines.length + showHint < maxHeight) {
+        lines.push(previewLine);
       }
     }
 

@@ -69,13 +69,13 @@ export interface MultiSelectOption<T extends string = string> {
 export interface FieldBase<T, TValues extends Record<string, unknown> = Record<string, unknown>> {
   readonly tab?: string;
   readonly label: string;
-  readonly description?: string;
+  readonly description?: string | ((values: Readonly<TValues>) => string);
   readonly default: T;
   readonly experimental?: boolean;
   readonly disabled?: boolean | ((values: Readonly<TValues>) => boolean);
   readonly visibleWhen?: (values: Readonly<TValues>) => boolean;
-  readonly format?: (value: T) => string;
-  readonly tone?: ValueTone | ((value: T) => ValueTone);
+  readonly format?: (value: T, values?: Readonly<TValues>) => string;
+  readonly tone?: ValueTone | ((value: T, values?: Readonly<TValues>) => ValueTone);
   readonly scopes?: readonly SettingsScope[];
 }
 
@@ -133,11 +133,28 @@ export interface NumberFieldDef<TValues extends Record<string, unknown> = Record
   readonly unit?: string;
 }
 
+export type ModelFieldValue<
+  TAllowClear extends boolean = boolean,
+  TIncludeThinking extends boolean = true,
+> =
+  | (false extends TIncludeThinking
+      ? true extends TIncludeThinking
+        ? ModelSelection | string
+        : string
+      : ModelSelection)
+  | (true extends TAllowClear ? null : never);
+
 export interface ModelFieldDef<
   TAllowClear extends boolean = boolean,
   TValues extends Record<string, unknown> = Record<string, unknown>,
-> extends FieldBase<TAllowClear extends true ? ModelSelection | null : ModelSelection, TValues> {
+  TIncludeThinking extends boolean = true,
+> extends FieldBase<ModelFieldValue<TAllowClear, TIncludeThinking>, TValues> {
   readonly kind: "model";
+  /**
+   * When `true` (default), prompts for both model and thinking level (`ModelSelection`).
+   * When `false`, prompts for model only and persists a `"provider/model-id"` string (or `null` when `allowClear: true`).
+   */
+  readonly includeThinking?: TIncludeThinking;
   /** Allow clearing the setting to `null` (e.g., inherit active model or disable). */
   readonly allowClear?: TAllowClear;
   /** Label shown when value is `null` and for the clear row in the picker. */
@@ -194,7 +211,7 @@ export type AnyFieldDef =
   | MultiSelectFieldDef<any, any>
   | StringFieldDef<any>
   | NumberFieldDef<any>
-  | ModelFieldDef<any, any>
+  | ModelFieldDef<any, any, any>
   | CustomFieldDef<any, any>;
 
 export type FieldMap = Record<string, AnyFieldDef>;
@@ -206,8 +223,8 @@ export type InferFieldValue<F> =
   F extends MultiSelectFieldDef<infer T, any> ? T[] :
   F extends StringFieldDef<any> ? string :
   F extends NumberFieldDef<any> ? number :
-  F extends ModelFieldDef<infer TAllowClear, any>
-    ? (true extends TAllowClear ? ModelSelection | null : ModelSelection) :
+  F extends ModelFieldDef<infer TAllowClear, any, infer TIncludeThinking>
+    ? ModelFieldValue<TAllowClear, TIncludeThinking> :
   F extends CustomFieldDef<infer T, any> ? T :
   never;
 
@@ -312,6 +329,18 @@ export interface SettingsSchema<TFields extends FieldMap = FieldMap> {
     scope: SettingsScope,
     existingLayers: SettingsLayersData<InferSettingsValues<TFields>>,
   ): Partial<InferSettingsValues<TFields>>;
-  formatFieldValue<K extends keyof TFields & string>(key: K, value: InferSettingsValues<TFields>[K]): string;
-  getFieldTone<K extends keyof TFields & string>(key: K, value: InferSettingsValues<TFields>[K]): ValueTone;
+  getFieldDescription<K extends keyof TFields & string>(
+    key: K,
+    values?: Readonly<InferSettingsValues<TFields>>,
+  ): string | undefined;
+  formatFieldValue<K extends keyof TFields & string>(
+    key: K,
+    value: InferSettingsValues<TFields>[K],
+    values?: Readonly<InferSettingsValues<TFields>>,
+  ): string;
+  getFieldTone<K extends keyof TFields & string>(
+    key: K,
+    value: InferSettingsValues<TFields>[K],
+    values?: Readonly<InferSettingsValues<TFields>>,
+  ): ValueTone;
 }
