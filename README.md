@@ -45,6 +45,7 @@ import { defineSettings, field, openSettingsDialog } from "pi-extension-settings
 const schema = defineSettings({
   id: "my-extension",
   title: "My Extension Settings",
+  settingsFile: "my-extension.json",
   tabs: [{ id: "general", label: "General" }],
   fields: {
     enabled: field.boolean({ tab: "general", label: "Enable extension", default: true }),
@@ -73,6 +74,8 @@ export default function (pi: ExtensionAPI) {
   });
 }
 ```
+
+With `settingsFile: "my-extension.json"`, settings automatically mirror to `~/.pi/agent/my-extension.json` (Global) and `<cwd>/.pi/my-extension.json` (Project).
 
 ## Documentation
 

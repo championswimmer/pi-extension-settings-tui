@@ -124,6 +124,7 @@ export const demoSchema = defineSettings({
   id: "demo-settings",
   title: "Demo Settings",
   description: "Interactive settings showcase for pi-extension-settings-tui.",
+  settingsFile: "demo-settings/settings.json",
   scopes: ["global", "project"],
   saveMode: "draft",
   tabs: [
@@ -247,17 +248,34 @@ export const demoSchema = defineSettings({
 export type DemoSettings = typeof demoSchema.Type;
 
 export default function demoSettingsExtension(pi: ExtensionAPI): void {
+  const getCustomSettingsFile = (): string | undefined => {
+    const value = process.env.DEMO_SETTINGS_FILE?.trim();
+    return value && value.length > 0 ? value : undefined;
+  };
+
   const getCustomFileName = (): string | undefined => {
     const value = process.env.DEMO_SETTINGS_FILENAME?.trim();
     return value && value.length > 0 ? value : undefined;
   };
 
+  const resolveStorageOverrides = (): { settingsFile?: string; fileName?: string } => {
+    const customSettingsFile = getCustomSettingsFile();
+    const customFileName = getCustomFileName();
+    return {
+      settingsFile:
+        customSettingsFile ??
+        (customFileName ? `${demoSchema.id}/${customFileName}` : undefined),
+      fileName: customFileName,
+    };
+  };
+
   pi.registerCommand("demo-settings", {
     description: "Open Demo Settings dialog (draft save mode)",
     handler: async (_args, ctx) => {
+      const storageOverrides = resolveStorageOverrides();
       await openSettingsDialog(ctx, {
         schema: demoSchema,
-        fileName: getCustomFileName(),
+        ...storageOverrides,
         onApply: (_next, meta) => {
           ctx.ui.notify(
             `Saved to ${meta.scope} (${meta.writtenKeys.length} override(s))`,
@@ -271,9 +289,10 @@ export default function demoSettingsExtension(pi: ExtensionAPI): void {
   pi.registerCommand("demo-settings-immediate", {
     description: "Open Demo Settings dialog (immediate save mode)",
     handler: async (_args, ctx) => {
+      const storageOverrides = resolveStorageOverrides();
       await openSettingsDialog(ctx, {
         schema: demoSchema,
-        fileName: getCustomFileName(),
+        ...storageOverrides,
         saveMode: "immediate",
         onApply: (_next, meta) => {
           ctx.ui.notify(

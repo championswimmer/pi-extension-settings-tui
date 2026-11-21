@@ -146,12 +146,18 @@ export interface StoragePathContext {
   readonly cwd: string;
   readonly id: string;
   readonly fileName: string;
+  readonly settingsFile?: string;
 }
 
 export interface StoragePathConfig {
+  readonly settingsFile?: string;
   readonly fileName?: string;
-  readonly globalPath?: string | ((ctx: Pick<StoragePathContext, "agentDir" | "id" | "fileName">) => string);
-  readonly projectPath?: string | ((ctx: Pick<StoragePathContext, "cwd" | "id" | "fileName">) => string);
+  readonly globalPath?:
+    | string
+    | ((ctx: Pick<StoragePathContext, "agentDir" | "id" | "fileName" | "settingsFile">) => string);
+  readonly projectPath?:
+    | string
+    | ((ctx: Pick<StoragePathContext, "cwd" | "id" | "fileName" | "settingsFile">) => string);
 }
 
 export interface SettingsSchemaConfig<TFields extends FieldMap> {
@@ -159,6 +165,7 @@ export interface SettingsSchemaConfig<TFields extends FieldMap> {
   readonly title: string;
   readonly description?: string;
   readonly version?: number;
+  readonly settingsFile?: string;
   readonly scopes?: readonly SettingsScope[];
   readonly defaultScope?: SettingsScope;
   readonly saveMode?: SaveMode;
@@ -207,6 +214,7 @@ export interface SettingsSchema<TFields extends FieldMap = FieldMap> {
   readonly scopes: readonly SettingsScope[];
   readonly defaultScope: SettingsScope;
   readonly saveMode: SaveMode;
+  readonly settingsFile?: string;
   readonly storage: StoragePathConfig;
   readonly fields: TFields;
   readonly fieldKeys: readonly (keyof TFields & string)[];

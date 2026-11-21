@@ -139,7 +139,11 @@ export function defineSettings<TFields extends FieldMap>(
   }
 
   const saveMode: SaveMode = config.saveMode ?? "draft";
-  const storage: StoragePathConfig = config.storage ?? {};
+  const settingsFile = config.settingsFile ?? config.storage?.settingsFile;
+  const storage: StoragePathConfig =
+    settingsFile !== undefined
+      ? { ...(config.storage ?? {}), settingsFile }
+      : (config.storage ?? {});
   const fieldKeys = Object.keys(config.fields) as (keyof TFields & string)[];
 
   const fieldTabMap = new Map<string, string>();
@@ -171,6 +175,7 @@ export function defineSettings<TFields extends FieldMap>(
     scopes,
     defaultScope,
     saveMode,
+    settingsFile,
     storage,
     fields: config.fields,
     fieldKeys,

@@ -221,6 +221,8 @@ async function setupDialog({
   mode = "fullscreen",
   schemaOverrides,
   customOpenSubroute,
+  theme = createMockTheme(),
+  wrapStore,
 } = {}) {
   const schema = createRichSchema(schemaOverrides);
   if (customOpenSubroute) {
@@ -230,10 +232,10 @@ async function setupDialog({
     };
   }
   const adapter = createMemoryStorageAdapter(initialLayers);
-  const store = createSettingsStore(schema, { adapter });
+  const rawStore = createSettingsStore(schema, { adapter });
+  const store = wrapStore ? wrapStore(rawStore, adapter) : rawStore;
   const initialState = await store.load({ trustedProject });
   const tui = createMockTui({ rows, columns, mode });
-  const theme = createMockTheme();
   const keybindings = createMockKeybindings();
   const results = [];
   const applied = [];
@@ -709,4 +711,253 @@ test("10. Mouse dead-space press returns { handled: true, render: false } and wh
 
   const scrolledLines = dialog.render(84);
   assert.ok(scrolledLines.some((l) => l.includes("↑")));
+});
+
+test("11. saveMode 'draft': in-memory holding, warning-colored ● Unsaved/(N) & * markers, revert, Ctrl+S batch save, Esc discard", async () => {
+  const WARN_START = "\x1b[33m";
+  const WARN_END = "\x1b[39m";
+  const warnTheme = {
+    ...createMockTheme(),
+    fg: (color, text) => (color === "warning" ? `${WARN_START}${text}${WARN_END}` : text),
+  };
+
+  let saveCalls = 0;
+  let writeCalls = 0;
+  const wrapWithWriteSpy = (rawStore, adapter) => {
+    const origWrite = adapter.writeLayer.bind(adapter);
+    adapter.writeLayer = async (...args) => {
+      writeCalls++;
+      return origWrite(...args);
+    };
+    return {
+      ...rawStore,
+      load: rawStore.load.bind(rawStore),
+      restoreDefaults: rawStore.restoreDefaults.bind(rawStore),
+      save: async (...args) => {
+        saveCalls++;
+        return rawStore.save(...args);
+      },
+    };
+  };
+
+  // Part A: Esc discards held in-memory changes with zero writes to store
+  const discardCtx = await setupDialog({
+    saveMode: "draft",
+    theme: warnTheme,
+    wrapStore: wrapWithWriteSpy,
+  });
+
+  // Clean initially: no ● Unsaved, no *
+  let lines = discardCtx.dialog.render(84);
+  assert.ok(!stripTerminalSequences(lines[1]).includes("● Unsaved"));
+  assert.ok(!lines.some((l) => l.includes(`${WARN_START}*${WARN_END}`)));
+
+  // Edit 1st field (Enabled -> false)
+  discardCtx.dialog.handleInput(" ");
+  assert.equal(saveCalls, 0);
+  assert.equal(writeCalls, 0);
+  assert.equal(discardCtx.applied.length, 0);
+  lines = discardCtx.dialog.render(84);
+  assert.ok(lines[1].includes(`${WARN_START}● Unsaved${WARN_END}`));
+  const enabledDirtyRow = lines.find((l) => stripTerminalSequences(l).includes("Enabled"));
+  assert.ok(enabledDirtyRow?.includes(`${WARN_START}*${WARN_END}`));
+
+  // Edit 2nd field (Mode -> Auto)
+  discardCtx.dialog.navigateTo({ tab: "general", field: "mode" });
+  discardCtx.dialog.handleInput(KEY_ENTER);
+  assert.equal(saveCalls, 0);
+  assert.equal(writeCalls, 0);
+  lines = discardCtx.dialog.render(84);
+  assert.ok(lines[1].includes(`${WARN_START}● Unsaved (2)${WARN_END}`));
+  const modeDirtyRow = lines.find((l) => stripTerminalSequences(l).includes("Mode"));
+  assert.ok(modeDirtyRow?.includes(`${WARN_START}*${WARN_END}`));
+
+  // Revert 1st field back to original (Enabled -> true) -> count drops to 1 and Enabled * clears
+  discardCtx.dialog.navigateTo({ tab: "general", field: "enabled" });
+  discardCtx.dialog.handleInput(" ");
+  lines = discardCtx.dialog.render(84);
+  assert.ok(lines[1].includes(`${WARN_START}● Unsaved${WARN_END}`));
+  assert.ok(!stripTerminalSequences(lines[1]).includes("● Unsaved ("));
+  const enabledCleanRow = lines.find((l) => stripTerminalSequences(l).includes("Enabled"));
+  assert.ok(!enabledCleanRow?.includes(`${WARN_START}*${WARN_END}`));
+
+  // Revert 2nd field back to original (Auto -> Strict -> Off) -> clears both * and ● Unsaved
+  discardCtx.dialog.navigateTo({ tab: "general", field: "mode" });
+  discardCtx.dialog.handleInput(KEY_ENTER);
+  discardCtx.dialog.handleInput(KEY_ENTER);
+  lines = discardCtx.dialog.render(84);
+  assert.ok(!stripTerminalSequences(lines[1]).includes("● Unsaved"));
+  const modeCleanRow = lines.find((l) => stripTerminalSequences(l).includes("Mode"));
+  assert.ok(!modeCleanRow?.includes(`${WARN_START}*${WARN_END}`));
+
+  // Dirty again and press Esc -> discards without writing to store
+  discardCtx.dialog.handleInput(KEY_ENTER); // Mode -> Auto
+  assert.ok(stripTerminalSequences(discardCtx.dialog.render(84)[1]).includes("● Unsaved"));
+  discardCtx.dialog.handleInput(KEY_ESC);
+  assert.equal(saveCalls, 0);
+  assert.equal(writeCalls, 0);
+  assert.equal(discardCtx.applied.length, 0);
+  assert.equal(discardCtx.results.length, 1);
+  assert.equal(discardCtx.results[0].saved, false);
+  assert.equal(discardCtx.results[0].dirty, true);
+  assert.equal(discardCtx.results[0].closedBy, "escape");
+  const discardLayer = await discardCtx.adapter.readLayer("global");
+  assert.equal(discardLayer.exists, false);
+  assert.equal(discardLayer.data, null);
+
+  // Part B: Ctrl+S persists all held in-memory changes together & clears dirty state
+  let ctrlSSaveCalls = 0;
+  let ctrlSWriteCalls = 0;
+  const saveCtx = await setupDialog({
+    saveMode: "draft",
+    theme: warnTheme,
+    customOpenSubroute: (params) => ({
+      title: "Custom",
+      focused: true,
+      render: () => ["custom"],
+      handleInput: (d) => {
+        if (d === KEY_ENTER) params.commit("modified-custom");
+      },
+      invalidate: () => {},
+    }),
+    wrapStore: (rawStore, adapter) => {
+      const origWrite = adapter.writeLayer.bind(adapter);
+      adapter.writeLayer = async (...args) => {
+        ctrlSWriteCalls++;
+        return origWrite(...args);
+      };
+      return {
+        ...rawStore,
+        load: rawStore.load.bind(rawStore),
+        restoreDefaults: rawStore.restoreDefaults.bind(rawStore),
+        save: async (...args) => {
+          ctrlSSaveCalls++;
+          return rawStore.save(...args);
+        },
+      };
+    },
+  });
+
+  // Modify Mode, Workers, and experimental Custom Note (verifying `*` after `[lab]`)
+  saveCtx.dialog.navigateTo({ tab: "general", field: "mode" });
+  saveCtx.dialog.handleInput(KEY_ENTER); // off -> auto
+  saveCtx.dialog.navigateTo({ tab: "advanced", field: "workers" });
+  saveCtx.dialog.handleInput(KEY_RIGHT); // 4 -> 5
+  saveCtx.dialog.navigateTo({ tab: "advanced", field: "customField" });
+  saveCtx.dialog.handleInput(KEY_ENTER);
+  saveCtx.dialog.handleInput(KEY_ENTER); // commit "modified-custom"
+
+  assert.equal(ctrlSSaveCalls, 0);
+  assert.equal(ctrlSWriteCalls, 0);
+  lines = saveCtx.dialog.render(84);
+  assert.ok(lines[1].includes(`${WARN_START}● Unsaved (3)${WARN_END}`));
+  const customRow = stripTerminalSequences(lines.find((l) => stripTerminalSequences(l).includes("Custom Note")) ?? "");
+  assert.ok(customRow.includes("Custom Note [lab] *"));
+
+  // Ctrl+S persists all 3 edits in a single save & clears dirty markers
+  saveCtx.dialog.handleInput(KEY_CTRL_S);
+  await new Promise((r) => setTimeout(r, 20));
+
+  assert.equal(ctrlSSaveCalls, 1);
+  assert.equal(ctrlSWriteCalls, 1);
+  assert.equal(saveCtx.applied.length, 1);
+  assert.equal(saveCtx.applied[0].next.mode, "auto");
+  assert.equal(saveCtx.applied[0].next.workers, 5);
+  assert.equal(saveCtx.applied[0].next.customField, "modified-custom");
+  assert.equal(saveCtx.results.length, 1);
+  assert.equal(saveCtx.results[0].saved, true);
+  assert.equal(saveCtx.results[0].dirty, false);
+  assert.equal(saveCtx.results[0].closedBy, "save");
+
+  const stored = await saveCtx.adapter.readLayer("global");
+  assert.equal(stored.exists, true);
+  assert.equal(stored.data?.mode, "auto");
+  assert.equal(stored.data?.workers, 5);
+  assert.equal(stored.data?.customField, "modified-custom");
+
+  // Re-rendering post-save reflects cleared dirty state
+  const afterSaveLines = saveCtx.dialog.render(84);
+  assert.ok(!stripTerminalSequences(afterSaveLines[1]).includes("● Unsaved"));
+  assert.ok(!afterSaveLines.some((l) => l.includes(`${WARN_START}*${WARN_END}`)));
+});
+
+test("12. saveMode 'immediate': serialized rapid back-to-back edits with zero dropped changes & Auto-save footer", async () => {
+  let inFlightSaves = 0;
+  let maxConcurrentSaves = 0;
+  let totalSaveCalls = 0;
+  const pendingGates = [];
+
+  const ctx = await setupDialog({
+    saveMode: "immediate",
+    mode: "fullscreen",
+    wrapStore: (rawStore) => ({
+      ...rawStore,
+      load: rawStore.load.bind(rawStore),
+      restoreDefaults: rawStore.restoreDefaults.bind(rawStore),
+      save: async (values, opts) => {
+        totalSaveCalls++;
+        inFlightSaves++;
+        maxConcurrentSaves = Math.max(maxConcurrentSaves, inFlightSaves);
+        // Force the first save to stay in-flight so synchronous follow-up edits race against it
+        await new Promise((resolve) => {
+          pendingGates.push(resolve);
+          setTimeout(resolve, 15);
+        });
+        try {
+          return await rawStore.save(values, opts);
+        } finally {
+          inFlightSaves--;
+        }
+      },
+    }),
+  });
+
+  // Footer shows Auto-save, no ● Unsaved badge, no [Ctrl+S Save] pill
+  let lines = ctx.dialog.render(84);
+  const footerLine = stripTerminalSequences(lines[lines.length - 2]);
+  assert.ok(footerLine.includes("Auto-save · Click/Enter edit"));
+  assert.ok(!footerLine.includes("[Ctrl+S Save]"));
+  assert.ok(footerLine.includes("[Esc Close]"));
+  assert.ok(!stripTerminalSequences(lines[1]).includes("● Unsaved"));
+
+  // Rapid back-to-back edits synchronously before awaiting:
+  // 1) Toggle Enabled (true -> false)
+  ctx.dialog.handleInput(" ");
+  // 2) Immediately move to Mode and cycle it (off -> auto), then cycle again (auto -> strict)
+  ctx.dialog.navigateTo({ tab: "general", field: "mode" });
+  ctx.dialog.handleInput(KEY_ENTER);
+  ctx.dialog.handleInput(KEY_ENTER);
+
+  // Immediately after synchronous edits: first save is in-flight, second flush hasn't overlapped
+  assert.equal(totalSaveCalls, 1);
+  assert.equal(maxConcurrentSaves, 1);
+
+  // Wait for serialized flushing to complete
+  await new Promise((r) => setTimeout(r, 60));
+
+  assert.equal(maxConcurrentSaves, 1);
+  assert.equal(totalSaveCalls, 2);
+  assert.equal(ctx.applied.length, 2);
+  assert.equal(ctx.applied[1].next.enabled, false);
+  assert.equal(ctx.applied[1].next.mode, "strict");
+
+  // Verify underlying storage has BOTH rapid edits persisted cleanly
+  const stored = await ctx.adapter.readLayer("global");
+  assert.equal(stored.exists, true);
+  assert.equal(stored.data?.enabled, false);
+  assert.equal(stored.data?.mode, "strict");
+
+  // Rendered dialog also retains both edits and has no ● Unsaved badge
+  lines = ctx.dialog.render(84);
+  assert.ok(!stripTerminalSequences(lines[1]).includes("● Unsaved"));
+  assert.ok(lines.some((l) => l.includes("Strict")));
+
+  // Esc closes with saved: true, closedBy: "immediate", and latest values
+  ctx.dialog.handleInput(KEY_ESC);
+  assert.equal(ctx.results.length, 1);
+  assert.equal(ctx.results[0].saved, true);
+  assert.equal(ctx.results[0].dirty, false);
+  assert.equal(ctx.results[0].closedBy, "immediate");
+  assert.equal(ctx.results[0].values.enabled, false);
+  assert.equal(ctx.results[0].values.mode, "strict");
 });

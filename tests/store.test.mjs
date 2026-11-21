@@ -9,6 +9,7 @@ import {
   MAX_SETTINGS_BYTES,
   SettingsSecurityError,
   assertNoSymlinkSegments,
+  assertSafeRelativeSettingsFile,
   computeJsonHash,
   createJsonFileStorageAdapter,
   createMemoryStorageAdapter,
@@ -40,6 +41,7 @@ function createSampleSchema(overrides = {}) {
   return defineSettings({
     id: overrides.id ?? "sample-ext",
     title: "Sample Extension",
+    settingsFile: overrides.settingsFile,
     scopes: overrides.scopes ?? ["global", "project"],
     storage: overrides.storage,
     migrate: overrides.migrate,
@@ -111,7 +113,20 @@ describe("store / path resolution & json adapter", () => {
     );
     assert.equal(
       resolveScopeFilePath(defaultSchema, "project", { agentDir, cwd }),
-      path.join(cwd, ".pi", "agent", "my-ext", "settings.json"),
+      path.join(cwd, ".pi", "my-ext", "settings.json"),
+    );
+
+    const customFileNameSchema = createSampleSchema({
+      id: "my-ext",
+      storage: { fileName: "prefs.json" },
+    });
+    assert.equal(
+      resolveScopeFilePath(customFileNameSchema, "global", { agentDir, cwd }),
+      path.join(agentDir, "my-ext", "prefs.json"),
+    );
+    assert.equal(
+      resolveScopeFilePath(customFileNameSchema, "project", { agentDir, cwd }),
+      path.join(cwd, ".pi", "my-ext", "prefs.json"),
     );
 
     // Custom fileName + resolver functions (matching pi-checklist / pi-context-decisions style)
@@ -143,6 +158,173 @@ describe("store / path resolution & json adapter", () => {
       global: path.join(agentDir, "custom-global.json"),
       project: path.join(cwd, ".pi", "custom-project.json"),
     });
+  });
+
+  it("resolves flat and nested settingsFile under <agentDir> and <cwd>/.pi with override precedence", async () => {
+    const root = makeTempDir();
+    const agentDir = path.join(root, "agent");
+    const cwd = path.join(root, "repo");
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.mkdirSync(cwd, { recursive: true });
+
+    // 1. Flat settingsFile
+    const flatSchema = createSampleSchema({
+      id: "flat-ext",
+      settingsFile: "my-ext.json",
+    });
+    assert.equal(
+      resolveScopeFilePath(flatSchema, "global", { agentDir, cwd }),
+      path.join(agentDir, "my-ext.json"),
+    );
+    assert.equal(
+      resolveScopeFilePath(flatSchema, "project", { agentDir, cwd }),
+      path.join(cwd, ".pi", "my-ext.json"),
+    );
+
+    // 2. Nested settingsFile
+    const nestedSchema = createSampleSchema({
+      id: "nested-ext",
+      settingsFile: "nested/dir/prefs.json",
+    });
+    assert.equal(
+      resolveScopeFilePath(nestedSchema, "global", { agentDir, cwd }),
+      path.join(agentDir, "nested", "dir", "prefs.json"),
+    );
+    assert.equal(
+      resolveScopeFilePath(nestedSchema, "project", { agentDir, cwd }),
+      path.join(cwd, ".pi", "nested", "dir", "prefs.json"),
+    );
+
+    // 3. Call-time settingsFile override on createSettingsStore
+    const storeOverride = createSettingsStore(flatSchema, {
+      agentDir,
+      cwd,
+      settingsFile: "override/custom.json",
+    });
+    assert.deepEqual(storeOverride.getPaths(), {
+      global: path.join(agentDir, "override", "custom.json"),
+      project: path.join(cwd, ".pi", "override", "custom.json"),
+    });
+
+    // 4. Round-trip Global + Project save/load/provenance using settingsFile
+    const roundTripStore = createSettingsStore(nestedSchema, { agentDir, cwd });
+    const s0 = await roundTripStore.load({ trustedProject: true });
+    const gSaved = await roundTripStore.patch(
+      { mode: "strict", maxItems: 40 },
+      { scope: "global", trustedProject: true, expectedSnapshot: s0.snapshot },
+    );
+    const pSaved = await roundTripStore.patch(
+      { maxItems: 75, enabled: false },
+      { scope: "project", trustedProject: true, expectedSnapshot: gSaved.loaded.snapshot },
+    );
+
+    assert.equal(fs.existsSync(path.join(agentDir, "nested", "dir", "prefs.json")), true);
+    assert.equal(fs.existsSync(path.join(cwd, ".pi", "nested", "dir", "prefs.json")), true);
+    assert.equal(pSaved.loaded.effective.mode, "strict");
+    assert.equal(pSaved.loaded.effective.maxItems, 75);
+    assert.equal(pSaved.loaded.effective.enabled, false);
+    assert.deepEqual(pSaved.loaded.provenance, {
+      enabled: "project",
+      mode: "global",
+      maxItems: "both",
+      tags: "default",
+      globalOnly: "default",
+      metadata: "default",
+    });
+
+    // 5. globalPath / projectPath take precedence over settingsFile and receive settingsFile + derived fileName
+    let capturedGlobalCtx;
+    let capturedProjectCtx;
+    const explicitWinsSchema = createSampleSchema({
+      id: "precedence-ext",
+      settingsFile: "nested/dir/prefs.json",
+      storage: {
+        globalPath: (ctx) => {
+          capturedGlobalCtx = ctx;
+          return path.join(ctx.agentDir, "legacy-global.json");
+        },
+        projectPath: (ctx) => {
+          capturedProjectCtx = ctx;
+          return path.join(ctx.cwd, "legacy-project.json");
+        },
+      },
+    });
+    assert.equal(
+      resolveScopeFilePath(explicitWinsSchema, "global", { agentDir, cwd }),
+      path.join(agentDir, "legacy-global.json"),
+    );
+    assert.equal(
+      resolveScopeFilePath(explicitWinsSchema, "project", { agentDir, cwd }),
+      path.join(cwd, "legacy-project.json"),
+    );
+    assert.deepEqual(capturedGlobalCtx, {
+      agentDir,
+      id: "precedence-ext",
+      fileName: "prefs.json",
+      settingsFile: "nested/dir/prefs.json",
+    });
+    assert.deepEqual(capturedProjectCtx, {
+      cwd,
+      id: "precedence-ext",
+      fileName: "prefs.json",
+      settingsFile: "nested/dir/prefs.json",
+    });
+  });
+
+  it("rejects unsafe settingsFile and fileName values with SettingsSecurityError(INVALID_PATH)", () => {
+    const root = makeTempDir();
+    const agentDir = path.join(root, "agent");
+    const cwd = path.join(root, "repo");
+    const baseSchema = createSampleSchema({ id: "sec-ext" });
+
+    const invalidSettingsFiles = [
+      "../escape.json",
+      "/abs.json",
+      "\\abs.json",
+      "a/../b.json",
+      "a/./b.json",
+      ".",
+      "..",
+      "dir/",
+      "dir\\",
+      "a//b.json",
+      "",
+      "   ",
+      "bad\0.json",
+      "C:\\foo.json",
+      "C:/foo.json",
+    ];
+
+    for (const bad of invalidSettingsFiles) {
+      assert.throws(
+        () => assertSafeRelativeSettingsFile(bad),
+        (err) => err instanceof SettingsSecurityError && err.code === "INVALID_PATH",
+        `Expected assertSafeRelativeSettingsFile to reject ${JSON.stringify(bad)}`,
+      );
+      assert.throws(
+        () => resolveScopeFilePath(baseSchema, "global", { agentDir, cwd, settingsFile: bad }),
+        (err) => err instanceof SettingsSecurityError && err.code === "INVALID_PATH",
+        `Expected resolveScopeFilePath(global) to reject ${JSON.stringify(bad)}`,
+      );
+      assert.throws(
+        () => resolveScopeFilePath(baseSchema, "project", { agentDir, cwd, settingsFile: bad }),
+        (err) => err instanceof SettingsSecurityError && err.code === "INVALID_PATH",
+        `Expected resolveScopeFilePath(project) to reject ${JSON.stringify(bad)}`,
+      );
+    }
+
+    for (const badFileName of ["../x.json", "a/b.json", "a\\b.json", ".", "..", "", "   ", "bad\0.json"]) {
+      assert.throws(
+        () => resolveScopeFilePath(baseSchema, "global", { agentDir, cwd, fileName: badFileName }),
+        (err) => err instanceof SettingsSecurityError && err.code === "INVALID_PATH",
+        `Expected resolveScopeFilePath(global) to reject fileName ${JSON.stringify(badFileName)}`,
+      );
+      assert.throws(
+        () => resolveScopeFilePath(baseSchema, "project", { agentDir, cwd, fileName: badFileName }),
+        (err) => err instanceof SettingsSecurityError && err.code === "INVALID_PATH",
+        `Expected resolveScopeFilePath(project) to reject fileName ${JSON.stringify(badFileName)}`,
+      );
+    }
   });
 
   it("persists override-only diffs, propagates global changes, and cleans up empty files", async () => {

@@ -47,6 +47,65 @@ function assertSafeSchemaId(id: string): void {
   }
 }
 
+function assertSafeFileName(fileName: string): void {
+  if (
+    typeof fileName !== "string" ||
+    fileName.trim().length === 0 ||
+    fileName.includes("\0") ||
+    fileName.includes("/") ||
+    fileName.includes("\\") ||
+    fileName === "." ||
+    fileName === ".."
+  ) {
+    throw new SettingsSecurityError(
+      "INVALID_PATH",
+      `Invalid fileName for default path resolution: "${String(fileName)}"`,
+      { fileName },
+    );
+  }
+}
+
+/**
+ * Validate a relative `settingsFile` path (e.g. `"my-ext.json"` or `"my-ext/settings.json"`)
+ * and return its validated path segments. Rejects absolute paths, drive prefixes,
+ * empty/trailing-slash paths, NUL bytes, and `.` / `..` segments.
+ */
+export function assertSafeRelativeSettingsFile(settingsFile: string): string[] {
+  if (typeof settingsFile !== "string" || settingsFile.includes("\0")) {
+    throw new SettingsSecurityError(
+      "INVALID_PATH",
+      `Invalid settingsFile path: "${String(settingsFile)}"`,
+      { settingsFile },
+    );
+  }
+  const trimmed = settingsFile.trim();
+  if (
+    trimmed.length === 0 ||
+    /^[A-Za-z]:/.test(trimmed) ||
+    trimmed.startsWith("/") ||
+    trimmed.startsWith("\\") ||
+    trimmed.endsWith("/") ||
+    trimmed.endsWith("\\")
+  ) {
+    throw new SettingsSecurityError(
+      "INVALID_PATH",
+      `Invalid relative settingsFile path: "${settingsFile}"`,
+      { settingsFile },
+    );
+  }
+  const segments = trimmed.split(/[/\\]/);
+  for (const seg of segments) {
+    if (seg.length === 0 || seg === "." || seg === "..") {
+      throw new SettingsSecurityError(
+        "INVALID_PATH",
+        `Invalid segment "${seg}" in settingsFile path: "${settingsFile}"`,
+        { settingsFile, segment: seg },
+      );
+    }
+  }
+  return segments;
+}
+
 export function resolveScopeFilePath<TFields extends FieldMap>(
   schema: SettingsSchema<TFields>,
   scope: SettingsScope,
@@ -54,34 +113,55 @@ export function resolveScopeFilePath<TFields extends FieldMap>(
 ): string {
   const agentDir = path.resolve(options?.agentDir ?? resolveDefaultAgentDir());
   const cwd = path.resolve(options?.cwd ?? process.cwd());
-  const fileName = options?.fileName ?? schema.storage.fileName ?? "settings.json";
+  const effectiveSettingsFile =
+    options?.settingsFile ?? schema.settingsFile ?? schema.storage.settingsFile;
+  const fileName =
+    options?.fileName ??
+    schema.storage.fileName ??
+    (effectiveSettingsFile
+      ? path.posix.basename(effectiveSettingsFile.replaceAll("\\", "/")) || "settings.json"
+      : "settings.json");
   const id = schema.id;
 
   if (scope === "global") {
     const configured = options?.globalPath ?? schema.storage.globalPath;
     if (typeof configured === "function") {
-      return path.resolve(configured({ agentDir, id, fileName }));
+      return path.resolve(
+        configured({ agentDir, id, fileName, settingsFile: effectiveSettingsFile }),
+      );
     }
     if (typeof configured === "string") {
       return path.isAbsolute(configured)
         ? path.resolve(configured)
         : path.resolve(agentDir, configured);
     }
+    if (effectiveSettingsFile !== undefined) {
+      const segs = assertSafeRelativeSettingsFile(effectiveSettingsFile);
+      return path.join(agentDir, ...segs);
+    }
     assertSafeSchemaId(id);
+    assertSafeFileName(fileName);
     return path.join(agentDir, id, fileName);
   }
 
   const configured = options?.projectPath ?? schema.storage.projectPath;
   if (typeof configured === "function") {
-    return path.resolve(configured({ cwd, id, fileName }));
+    return path.resolve(
+      configured({ cwd, id, fileName, settingsFile: effectiveSettingsFile }),
+    );
   }
   if (typeof configured === "string") {
     return path.isAbsolute(configured)
       ? path.resolve(configured)
       : path.resolve(cwd, configured);
   }
+  if (effectiveSettingsFile !== undefined) {
+    const segs = assertSafeRelativeSettingsFile(effectiveSettingsFile);
+    return path.join(cwd, ".pi", ...segs);
+  }
   assertSafeSchemaId(id);
-  return path.join(cwd, ".pi", "agent", id, fileName);
+  assertSafeFileName(fileName);
+  return path.join(cwd, ".pi", id, fileName);
 }
 
 function isWithinRoot(targetPath: string, rootPath: string): boolean {

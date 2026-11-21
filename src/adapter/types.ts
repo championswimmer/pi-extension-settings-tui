@@ -16,6 +16,7 @@ export interface OpenSettingsDialogOptions<TFields extends FieldMap> {
   readonly adapter?: StorageAdapter;
   readonly agentDir?: string;
   readonly cwd?: string;
+  readonly settingsFile?: string;
   readonly fileName?: string;
   readonly globalPath?: StoragePathConfig["globalPath"];
   readonly projectPath?: StoragePathConfig["projectPath"];

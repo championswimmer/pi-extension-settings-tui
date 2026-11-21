@@ -72,6 +72,7 @@ export async function openSettingsDialog<TFields extends FieldMap>(
       adapter: options.adapter,
       agentDir: options.agentDir,
       cwd: options.cwd ?? ctx.cwd,
+      settingsFile: options.settingsFile,
       fileName: options.fileName,
       globalPath: options.globalPath,
       projectPath: options.projectPath,

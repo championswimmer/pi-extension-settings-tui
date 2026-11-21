@@ -102,9 +102,15 @@ pi-extension-settings-tui/
 - Inside `tmux` / `zellij` / `screen`, Pi omits `\x1b[?1003h` (all-motion tracking), so `"move"` hover events will not fire there — never rely on hover for discoverability or state.
 
 ### Storage & security invariants
-- Default file locations:
-  - Global: `path.join(agentDir, schema.id, fileName)` (`agentDir` = `$PI_CODING_AGENT_DIR` else `~/.pi/agent`, default `fileName` = `"settings.json"`).
-  - Project: `path.join(cwd, ".pi", "agent", schema.id, fileName)`.
+- Path resolution (`resolveScopeFilePath`):
+  - `settingsFile` (configured via `defineSettings({ settingsFile })`, `storage.settingsFile`, or per-call options on `createSettingsStore` / `createJsonFileStorageAdapter` / `openSettingsDialog`) accepts a flat filename or relative subpath and resolves symmetrically:
+    - Global: `path.join(agentDir, settingsFile)` (`agentDir` = `$PI_CODING_AGENT_DIR` else `~/.pi/agent`).
+    - Project: `path.join(cwd, ".pi", settingsFile)`.
+  - `settingsFile` rejects absolute paths, `.` / `..` traversal segments, empty or trailing-slash paths, drive prefixes, and NUL bytes (`SettingsSecurityError("INVALID_PATH")`).
+  - When `settingsFile` is omitted, default file locations are:
+    - Global: `path.join(agentDir, schema.id, fileName)` (default `fileName` = `"settings.json"`).
+    - Project: `path.join(cwd, ".pi", schema.id, fileName)`.
+  - Explicit `globalPath` / `projectPath` overrides take precedence over `settingsFile` as an escape hatch for legacy asymmetric layouts.
 - Override-only persistence: `global` stores only diffs from defaults; `project` stores only diffs from `global ?? defaults`. Empty diffs delete the layer file when `deleteWhenEmpty !== false`.
 - **macOS `/var` & `/tmp` symlink caveat**: `assertNoSymlinkSegments` resolves `baseRoot` via `realpathSync` first and checks segments strictly **below** `baseRoot` + the target file (`lstatSync` + `O_NOFOLLOW`) so macOS OS-level symlinks (`/tmp -> /private/tmp`, `/var -> /private/var`) do not false-fail while real symlinks inside the storage root are rejected.
 - Atomic writes: create parent dirs `0o700`, open `.settings.<uuid>.tmp` with `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW` mode `0o600`, write UTF-8, `fsyncSync`, close, re-check target is not symlink, `renameSync`, clean up temp file in `finally`.

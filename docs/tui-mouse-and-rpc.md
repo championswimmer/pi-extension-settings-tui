@@ -34,7 +34,28 @@ Inside that single overlay, `SettingsDialogComponent` maintains an internal navi
 
 ---
 
-## 2. Keyboard Shortcut Reference
+## 2. Save Modes (`draft` vs `immediate`)
+
+Extensions configure `saveMode` either on the schema via `defineSettings({ saveMode: "draft" | "immediate", ... })` (defaults to `"draft"`) or per invocation via `openSettingsDialog(ctx, { schema, saveMode: "immediate" })` (and `SettingsDialogOptions.saveMode` when instantiating `SettingsDialogComponent` directly).
+
+### `saveMode: "draft"` (Default)
+- **In-memory draft holding:** Editing fields updates an in-memory draft only — **zero** writes hit the storage adapter and `onApply` is not invoked until the user explicitly saves.
+- **Warning-colored unsaved indicators:**
+  - The dialog header displays `● Unsaved` (or `● Unsaved (N)` when multiple fields differ from baseline) in warning color.
+  - Every modified field row appends a warning-colored `*` directly after its label (and after `[lab]` if `experimental: true`).
+  - Reverting a modified field back to its baseline value automatically clears both its row `*` and updates/clears the header `● Unsaved` badge.
+- **Commit or discard:**
+  - Pressing `Ctrl+S` (or clicking `[Ctrl+S Save]`) persists all held in-memory edits in a single atomic `store.save(...)` call, triggers `onApply`, clears dirty state, and closes with `closedBy: "save"`.
+  - Pressing `Esc` (or clicking `[Esc Discard]`) discards all in-memory edits without writing to disk and closes with `closedBy: "escape"` / `"cancel"` (`saved: false`, `dirty` reflecting whether edits were discarded).
+
+### `saveMode: "immediate"`
+- **Serialized immediate auto-saving:** Every committed field edit triggers `store.save(...)` and `onApply` immediately without waiting for `Ctrl+S`.
+- **Rapid-edit race protection:** `SettingsDialogComponent` tracks a monotonic `draftVersion` on every field commit and serializes in-flight writes with `pendingImmediateSave`. If new edits arrive while an async `store.save(...)` is still in flight, the completing save updates `loadedState` and `baselineValues` without clobbering newer `draftValues`, and immediately flushes the latest draft in `finally` — preventing dropped edits or false `ConcurrencyConflictError` collisions.
+- **Auto-save UI cues:** The footer hint is prefixed with `Auto-save · ` (e.g. `Auto-save · Click/Enter edit · Tab tabs · Wheel scroll`), the `[Ctrl+S Save]` pill and `● Unsaved` badge are omitted, and closing via `Esc` / `[Esc Close]` returns `closedBy: "immediate"` with `saved: true` if any save succeeded.
+
+---
+
+## 3. Keyboard Shortcut Reference
 
 | Context | Key(s) | Action |
 | :--- | :--- | :--- |
@@ -66,7 +87,7 @@ Inside that single overlay, `SettingsDialogComponent` maintains an internal navi
 
 ---
 
-## 3. Fullscreen SGR Mouse Mode vs. Regular Mode
+## 4. Fullscreen SGR Mouse Mode vs. Regular Mode
 
 `SettingsDialogComponent` inspects `tui.mode`:
 
@@ -106,7 +127,7 @@ Inside that single overlay, `SettingsDialogComponent` maintains an internal navi
 
 ---
 
-## 4. Singleton Reuse, `AbortSignal`, RPC & Headless Behavior
+## 5. Singleton Reuse, `AbortSignal`, RPC & Headless Behavior
 
 ### Singleton Overlay Reuse
 `openSettingsDialog` tracks active TUI overlays in a module registry keyed by `schema.id`:
@@ -151,7 +172,7 @@ When running non-interactively (e.g. `pi -p` or `--mode json` or `!ctx.hasUI`), 
 
 ---
 
-## 5. Subpath Exports
+## 6. Subpath Exports
 
 `package.json` exposes 5 clean ESM + TypeScript declaration entry points so you only pull in the runtime dependencies you need:
 

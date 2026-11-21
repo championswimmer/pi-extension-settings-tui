@@ -34,6 +34,7 @@ export const mySettingsSchema = defineSettings({
   id: "my-extension",
   title: "My Extension Settings",
   description: "Configure behavior globally or per trusted project.",
+  settingsFile: "my-extension.json",
   saveMode: "draft", // "draft" (Ctrl+S) | "immediate"
   scopes: ["global", "project"],
   tabs: [
@@ -93,6 +94,15 @@ export type MySettings = typeof mySettingsSchema.Type;
 ```
 
 > **Note:** `schema.Type` is a compile-time phantom property (`InferSettingsValues<TFields>`). Use `typeof mySettingsSchema.Type` in type positions, and `mySettingsSchema.getDefaults()` if you need a fresh runtime clone of the default values.
+
+### Automatic Mirrored File Paths (`settingsFile`)
+
+Setting `settingsFile` on `defineSettings(...)` (either a flat filename like `"my-extension.json"` or a relative subpath like `"my-extension/settings.json"`) keeps Global and Project locations mirrored automatically:
+
+- **Global:** `~/.pi/agent/<settingsFile>` (or `$PI_CODING_AGENT_DIR/<settingsFile>`)
+- **Project:** `<cwd>/.pi/<settingsFile>`
+
+If `settingsFile` is omitted, the store falls back to `<agentDir>/<id>/settings.json` and `<cwd>/.pi/<id>/settings.json`. You can also override `settingsFile` per call in `createSettingsStore`, `createJsonFileStorageAdapter`, or `openSettingsDialog`. See [Storage & Security](storage-and-security.md#2-customizing-storage-paths--file-names) for validation rules and legacy overrides.
 
 ---
 

@@ -102,6 +102,8 @@ export class SettingsDialogComponent<TFields extends FieldMap>
   private statusBanner: StatusBanner | undefined;
   private conflictError = false;
   private isSaving = false;
+  private pendingImmediateSave = false;
+  private draftVersion = 0;
   private everSavedImmediate = false;
   private closed = false;
   private _focused = false;
@@ -160,8 +162,16 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     return tabs[0]?.id ?? "general";
   }
 
+  private isFieldDirty(key: string): boolean {
+    return !deepEqual(this.draftValues[key], this.baselineValues[key]);
+  }
+
+  private getDirtyFieldKeys(): string[] {
+    return Object.keys(this.options.schema.fields).filter((key) => this.isFieldDirty(key));
+  }
+
   private isDirty(): boolean {
-    return !deepEqual(this.draftValues, this.baselineValues);
+    return this.getDirtyFieldKeys().length > 0;
   }
 
   /** Jump to a specific tab and/or field key cleanly. */
@@ -396,8 +406,13 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     }
 
     const rightParts: string[] = [];
-    if (this.saveMode === "draft" && this.isDirty()) {
-      rightParts.push(theme.fg("warning", "● Unsaved"));
+    if (this.saveMode === "draft") {
+      const dirtyCount = this.getDirtyFieldKeys().length;
+      if (dirtyCount > 0) {
+        rightParts.push(
+          theme.fg("warning", dirtyCount > 1 ? `● Unsaved (${dirtyCount})` : "● Unsaved"),
+        );
+      }
     }
     const scopeLabel = this.activeScope === "project" ? "Project" : "Global";
     const scopeColor = this.activeScope === "project" ? "success" : "accent";
@@ -646,9 +661,11 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     const tone = schema.getFieldTone(key, value);
 
     const labBadge = def.experimental ? ` ${theme.fg("warning", "[lab]")}` : "";
+    const dirtyMarker =
+      this.saveMode === "draft" && this.isFieldDirty(key) ? ` ${theme.fg("warning", "*")}` : "";
     const labelText = disabled
-      ? theme.fg("dim", def.label) + labBadge
-      : theme.fg(isSelected ? "accent" : "text", def.label) + labBadge;
+      ? theme.fg("dim", def.label) + labBadge + dirtyMarker
+      : theme.fg(isSelected ? "accent" : "text", def.label) + labBadge + dirtyMarker;
 
     const provenance = this.loadedState.provenance[key] ?? "default";
     const provCells = isMultiScope ? this.renderProvenanceCells(provenance, theme) : "";
@@ -762,7 +779,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     const totalPillW = pills.reduce((sum, p, i) => sum + visibleWidth(p.text) + (i > 0 ? 1 : 0), 0);
     const hintBudget = Math.max(0, innerWidth - totalPillW - 1);
 
-    const hintStr =
+    const baseHintStr =
       tui.mode === "fullscreen"
         ? schema.tabs.length > 1
           ? "Click/Enter edit · Tab tabs · Wheel scroll"
@@ -770,6 +787,9 @@ export class SettingsDialogComponent<TFields extends FieldMap>
         : schema.tabs.length > 1
           ? "↑/↓ move · Enter edit · Tab tabs"
           : "↑/↓ move · Enter edit";
+
+    const hintStr =
+      this.saveMode === "immediate" ? `Auto-save · ${baseHintStr}` : baseHintStr;
 
     const clippedHint =
       hintBudget >= 10
@@ -1415,6 +1435,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     } as InferSettingsValues<TFields>;
 
     this.draftValues = updated;
+    this.draftVersion++;
     this.statusBanner = undefined;
 
     const rows = this.buildRootRows();
@@ -1429,7 +1450,13 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     nextValues: InferSettingsValues<TFields>,
     closeAfterSave: boolean,
   ): Promise<void> {
-    if (this.isSaving || this.closed) return;
+    if (this.closed) return;
+    if (this.isSaving) {
+      if (this.saveMode === "immediate" && !closeAfterSave) {
+        this.pendingImmediateSave = true;
+      }
+      return;
+    }
     if (this.activeScope === "project" && !this.loadedState.trustedProject) {
       this.statusBanner = {
         text: "Cannot save to Project scope: project is untrusted.",
@@ -1440,6 +1467,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     }
 
     this.isSaving = true;
+    const versionAtSaveStart = this.draftVersion;
     try {
       const result = await this.options.store.save(nextValues, {
         scope: this.activeScope,
@@ -1449,7 +1477,9 @@ export class SettingsDialogComponent<TFields extends FieldMap>
 
       this.loadedState = result.loaded;
       this.baselineValues = cloneValue(result.loaded.effective);
-      this.draftValues = cloneValue(result.loaded.effective);
+      if (this.draftVersion === versionAtSaveStart) {
+        this.draftValues = cloneValue(result.loaded.effective);
+      }
       this.conflictError = false;
       this.statusBanner = undefined;
 
@@ -1490,6 +1520,12 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       this.options.tui.requestRender();
     } finally {
       this.isSaving = false;
+      if (this.pendingImmediateSave) {
+        this.pendingImmediateSave = false;
+        if (!this.closed && !this.conflictError && this.saveMode === "immediate") {
+          void this.persistDraft(this.draftValues, false);
+        }
+      }
     }
   }
 
@@ -1506,6 +1542,8 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       this.loadedState = result.loaded;
       this.baselineValues = cloneValue(result.loaded.effective);
       this.draftValues = cloneValue(result.loaded.effective);
+      this.draftVersion++;
+      this.pendingImmediateSave = false;
       this.conflictError = false;
       if (this.saveMode === "immediate") {
         this.everSavedImmediate = true;
@@ -1553,6 +1591,8 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       this.loadedState = loaded;
       this.baselineValues = cloneValue(loaded.effective);
       this.draftValues = cloneValue(loaded.effective);
+      this.draftVersion++;
+      this.pendingImmediateSave = false;
       this.conflictError = false;
       this.statusBanner = {
         text: "Reloaded settings from disk.",

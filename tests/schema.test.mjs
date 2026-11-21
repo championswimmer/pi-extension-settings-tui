@@ -594,3 +594,41 @@ test("formatFieldValue and getFieldTone defaults and custom overrides", () => {
   assert.equal(schema.formatFieldValue("customFmt", 42), "#42");
   assert.equal(schema.getFieldTone("customFmt", 42), "accent");
 });
+
+test("defineSettings resolves settingsFile from top-level config or storage.settingsFile", () => {
+  const omitted = defineSettings({
+    id: "no-sf",
+    title: "No SettingsFile",
+    fields: {},
+  });
+  assert.equal(omitted.settingsFile, undefined);
+  assert.equal(omitted.storage.settingsFile, undefined);
+
+  const topLevel = defineSettings({
+    id: "top-sf",
+    title: "Top SettingsFile",
+    settingsFile: "my-ext.json",
+    fields: {},
+  });
+  assert.equal(topLevel.settingsFile, "my-ext.json");
+  assert.equal(topLevel.storage.settingsFile, "my-ext.json");
+
+  const fromStorage = defineSettings({
+    id: "storage-sf",
+    title: "Storage SettingsFile",
+    storage: { settingsFile: "nested/prefs.json" },
+    fields: {},
+  });
+  assert.equal(fromStorage.settingsFile, "nested/prefs.json");
+  assert.equal(fromStorage.storage.settingsFile, "nested/prefs.json");
+
+  const topWins = defineSettings({
+    id: "top-wins",
+    title: "Top Wins",
+    settingsFile: "preferred.json",
+    storage: { settingsFile: "fallback.json" },
+    fields: {},
+  });
+  assert.equal(topWins.settingsFile, "preferred.json");
+  assert.equal(topWins.storage.settingsFile, "preferred.json");
+});

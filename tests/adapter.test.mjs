@@ -802,3 +802,77 @@ test("RPC discard confirmation and AbortSignal handling work cleanly in both TUI
   assert.equal(rpcAbortResult.saved, false);
   assert.equal(rpcAbortResult.closedBy, "abort");
 });
+
+test("openSettingsDialog forwards schema and call-time settingsFile to store paths", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-settings-adapter-sf-"));
+  try {
+    const agentDir = path.join(tempRoot, "agent");
+    const cwd = path.join(tempRoot, "project");
+    fs.mkdirSync(path.join(agentDir, "nested"), { recursive: true });
+    fs.mkdirSync(path.join(cwd, ".pi", "nested"), { recursive: true });
+
+    fs.writeFileSync(
+      path.join(agentDir, "my-ext.json"),
+      JSON.stringify({ retries: 8 }),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(cwd, ".pi", "my-ext.json"),
+      JSON.stringify({ enabled: false }),
+      "utf8",
+    );
+
+    fs.writeFileSync(
+      path.join(agentDir, "nested", "override.json"),
+      JSON.stringify({ mode: "strict" }),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(cwd, ".pi", "nested", "override.json"),
+      JSON.stringify({ retries: 6 }),
+      "utf8",
+    );
+
+    const baseSchema = createTestSchema("adapter-sf-test");
+    const schemaWithSf = defineSettings({
+      ...baseSchema.config,
+      id: "adapter-sf-schema",
+      settingsFile: "my-ext.json",
+    });
+
+    const { ctx } = createBaseContext({
+      mode: "json",
+      hasUI: false,
+      cwd,
+      isProjectTrusted: () => true,
+    });
+
+    // Schema-level settingsFile
+    const schemaResult = await openSettingsDialog(ctx, {
+      schema: schemaWithSf,
+      agentDir,
+    });
+    assert.deepEqual(schemaResult.paths, {
+      global: path.join(agentDir, "my-ext.json"),
+      project: path.join(cwd, ".pi", "my-ext.json"),
+    });
+    assert.equal(schemaResult.values.retries, 8);
+    assert.equal(schemaResult.values.enabled, false);
+
+    // Call-time settingsFile override
+    const overrideResult = await openSettingsDialog(ctx, {
+      schema: schemaWithSf,
+      agentDir,
+      settingsFile: "nested/override.json",
+    });
+    assert.deepEqual(overrideResult.paths, {
+      global: path.join(agentDir, "nested", "override.json"),
+      project: path.join(cwd, ".pi", "nested", "override.json"),
+    });
+    assert.equal(overrideResult.values.mode, "strict");
+    assert.equal(overrideResult.values.retries, 6);
+    assert.equal(overrideResult.values.enabled, true);
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});

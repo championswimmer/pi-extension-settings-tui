@@ -38,54 +38,71 @@ schema defaults  ──▶  global overrides  ──▶  project overrides (if t
 
 ## 2. Customizing Storage Paths & File Names
 
-### Default Layout
+### First-Class `settingsFile` (Recommended)
 
-Without custom `storage` configuration, `resolveScopeFilePath` writes to:
+Most extensions want the exact same relative file path in both Global and Project scopes. Set `settingsFile` directly on `defineSettings(...)`, inside `storage: { settingsFile }`, or as a per-call override on `createSettingsStore(schema, options)`, `createJsonFileStorageAdapter(schema, options)`, or `openSettingsDialog(ctx, options)`.
 
-- **Global:** `<agentDir>/<schema.id>/settings.json`
-  - `resolveDefaultAgentDir()` honors `$PI_CODING_AGENT_DIR` (expanding `~` / `~/...`), falling back to `~/.pi/agent`.
-- **Project:** `<cwd>/.pi/agent/<schema.id>/settings.json`
+`settingsFile` accepts either a **flat filename** or a **relative subpath**, and automatically resolves both scopes symmetrically:
 
-> **Schema ID constraint:** When using the default nested layout, `schema.id` must not be empty, `.`, `..`, or contain `/`, `\`, or NUL bytes (otherwise `SettingsSecurityError("INVALID_PATH")` is thrown).
+- **Global:** `<agentDir>/<settingsFile>` (`resolveDefaultAgentDir()` honors `$PI_CODING_AGENT_DIR`, expanding `~` / `~/...`, and falls back to `~/.pi/agent`)
+- **Project:** `<cwd>/.pi/<settingsFile>`
 
-### Configuring `fileName`, `globalPath`, and `projectPath`
-
-You can customize paths directly in `defineSettings({ storage })`, or override them per call in `createSettingsStore(schema, options)` / `openSettingsDialog(ctx, options)`:
-
-- `fileName?: string` — overrides `"settings.json"`.
-- `globalPath?: string | ((ctx: { agentDir: string; id: string; fileName: string }) => string)`
-  - If a relative string is given, it is resolved relative to `agentDir`.
-- `projectPath?: string | ((ctx: { cwd: string; id: string; fileName: string }) => string)`
-  - If a relative string is given, it is resolved relative to `cwd`.
-
-#### Real-World Migration Example: Flat Extension Files
-
-Many existing Pi extensions already store settings as flat JSON files such as `~/.pi/agent/my-ext.json` and `<cwd>/.pi/my-ext.json`. Match that layout seamlessly without breaking existing user configs:
+#### Flat filename example (`~/.pi/agent/pi-checklist.json` & `<cwd>/.pi/pi-checklist.json`)
 
 ```ts
-import * as path from "node:path";
 import { defineSettings, field } from "pi-extension-settings-tui";
 
-export const schema = defineSettings({
-  id: "my-ext",
-  title: "My Extension",
-  storage: {
-    fileName: "my-ext.json",
-    globalPath: ({ agentDir, fileName }) => path.join(agentDir, fileName),
-    projectPath: ({ cwd, fileName }) => path.join(cwd, ".pi", fileName),
-  },
+export const checklistSchema = defineSettings({
+  id: "pi-checklist",
+  title: "Checklist Settings",
+  settingsFile: "pi-checklist.json",
   fields: {
     enabled: field.boolean({ label: "Enabled", default: true }),
   },
 });
 ```
 
-Or use relative string paths (resolved against `agentDir` and `cwd` respectively):
+#### Nested subpath example (`~/.pi/agent/context-prune/settings.json` & `<cwd>/.pi/context-prune/settings.json`)
+
+```ts
+import { defineSettings, field } from "pi-extension-settings-tui";
+
+export const pruneSchema = defineSettings({
+  id: "context-prune",
+  title: "Context Prune Settings",
+  settingsFile: "context-prune/settings.json",
+  fields: {
+    maxTokens: field.integer({ label: "Max tokens", default: 12000, min: 1000 }),
+  },
+});
+```
+
+> **`settingsFile` path validation:** To prevent directory escapes, `settingsFile` rejects absolute paths, `.` or `..` traversal segments, empty or trailing-slash paths, Windows drive prefixes (e.g., `C:`), and NUL bytes (`\0`), throwing `SettingsSecurityError("INVALID_PATH")`.
+
+### Default Layout (When `settingsFile` Is Omitted)
+
+When `settingsFile` (and `globalPath` / `projectPath`) are omitted, `resolveScopeFilePath` writes to:
+
+- **Global:** `<agentDir>/<id>/<fileName>` (default `fileName`: `"settings.json"`)
+- **Project:** `<cwd>/.pi/<id>/<fileName>`
+
+> **Schema ID constraint:** When using the default nested layout, `schema.id` must not be empty, `.`, `..`, or contain `/`, `\`, or NUL bytes (otherwise `SettingsSecurityError("INVALID_PATH")` is thrown).
+
+### Legacy Asymmetric Overrides (`globalPath`, `projectPath`, `fileName`)
+
+For legacy layouts where Global and Project paths cannot share the same `<settingsFile>` suffix, `globalPath` and `projectPath` remain supported as an escape hatch in `defineSettings({ storage })` or per-call options (and **take precedence over `settingsFile`** when set):
+
+- `fileName?: string` — overrides `"settings.json"` in the default `<id>/<fileName>` layout (when `settingsFile` is not set).
+- `globalPath?: string | ((ctx: { agentDir: string; id: string; fileName: string }) => string)`
+  - If a relative string is given, it is resolved relative to `agentDir`.
+- `projectPath?: string | ((ctx: { cwd: string; id: string; fileName: string }) => string)`
+  - If a relative string is given, it is resolved relative to `cwd`.
 
 ```ts
 storage: {
-  globalPath: "my-ext.json",      // -> <agentDir>/my-ext.json
-  projectPath: ".pi/my-ext.json", // -> <cwd>/.pi/my-ext.json
+  // Escape hatch for asymmetric legacy paths (takes precedence over settingsFile)
+  globalPath: "legacy-global.json",         // -> <agentDir>/legacy-global.json
+  projectPath: ".pi/config/legacy.json",    // -> <cwd>/.pi/config/legacy.json
 }
 ```
 

@@ -103,6 +103,7 @@ export interface LoadSettingsOptions {
 export interface JsonFileStorageOptions {
   readonly agentDir?: string;
   readonly cwd?: string;
+  readonly settingsFile?: string;
   readonly fileName?: string;
   readonly globalPath?: StoragePathConfig["globalPath"];
   readonly projectPath?: StoragePathConfig["projectPath"];

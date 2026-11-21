@@ -28,6 +28,7 @@ export {
   type WriteJsonFileOptions,
 } from "./fs-hardening.js";
 export {
+  assertSafeRelativeSettingsFile,
   createJsonFileStorageAdapter,
   resolveDefaultAgentDir,
   resolveScopeFilePath,
