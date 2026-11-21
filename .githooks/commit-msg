@@ -1,0 +1,45 @@
+#!/bin/sh
+# Enforces Conventional Commits types: feat fix docs style refactor perf test build ci chore revert
+# See .agents/skills/git-commit/SKILL.md. Bypass (force) with: git commit --no-verify
+#
+# Accepted subject lines:
+#   feat: add X            fix(dialog): handle Y        chore(release): v1.2.3
+#   ci: update workflow    feat!: breaking change       feat(store)!: breaking change
+# Also allowed untouched: merge commits, reverts, fixup!/squash!/amend! commits.
+
+MSG_FILE="$1"
+# First non-comment, non-empty line is the subject.
+SUBJECT=$(grep -v '^#' "$MSG_FILE" | sed '/^[[:space:]]*$/d' | head -n 1)
+
+case "$SUBJECT" in
+  "Merge "* | "Revert "* | "fixup! "* | "squash! "* | "amend! "*) exit 0 ;;
+esac
+
+if printf '%s\n' "$SUBJECT" | grep -Eq '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: [^[:space:]].*'; then
+  exit 0
+fi
+
+cat >&2 <<EOF
+✖ Commit rejected: message must start with a Conventional Commits type
+
+  Got:      $SUBJECT
+
+  Format:   <type>[(scope)][!]: <description>
+  Types:    feat     – new user-facing functionality  (CHANGELOG: Features)
+            fix      – user-facing bug fix             (CHANGELOG: Bug Fixes)
+            docs     – documentation only
+            style    – formatting, no code change
+            refactor – code change, no behaviour change
+            perf     – performance improvement
+            test     – tests only
+            build    – build system, packaging, deps
+            ci       – CI/CD workflows
+            chore    – maintenance, tooling, release bumps
+            revert   – reverts a previous commit
+  Examples: feat(dialog): add pill row hover state
+            fix(store): reject symlinked project dir
+            chore(release): v0.6.0
+
+  To force this commit anyway: git commit --no-verify
+EOF
+exit 1
