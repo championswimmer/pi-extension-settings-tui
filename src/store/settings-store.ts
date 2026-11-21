@@ -2,8 +2,10 @@ import {
   cloneValue,
   deepEqual,
   findSecretKeys,
+  isPersistedFieldDef,
   type FieldMap,
   type InferSettingsValues,
+  type PersistedFieldKeys,
   type SettingsLayersData,
   type SettingsSchema,
   type SettingsScope,
@@ -55,6 +57,10 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
       : { data: null, hash: null, exists: false };
 
     const warnings: string[] = [];
+    const rejectedKeys: Record<SettingsScope, string[]> = {
+      global: [],
+      project: [],
+    };
     const migratedScopes: SettingsScope[] = [];
 
     const parseLayer = (
@@ -84,6 +90,7 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
       }
 
       const validated = this.schema.validatePartial(raw);
+      rejectedKeys[scope].push(...validated.rejectedKeys);
       for (const warning of validated.warnings) {
         warnings.push(
           warning.key
@@ -94,9 +101,8 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
 
       // Enforce field-level scope restrictions if configured.
       const scopedValues: Partial<TValues> = {};
-      for (const key of Object.keys(validated.values) as (keyof TFields & string)[]) {
-        const fieldDef = this.schema.fields[key];
-        if (fieldDef?.scopes && !fieldDef.scopes.includes(scope)) {
+      for (const key of Object.keys(validated.values) as PersistedFieldKeys<TFields>[]) {
+        if (!this.schema.isFieldAllowedInScope(key, scope)) {
           warnings.push(
             `${scope}.${key}: field is not allowed in "${scope}" scope; ignored.`,
           );
@@ -129,9 +135,8 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
             : this.schema.resolveEffective(layers, { includeProject: true });
         const rawDiff = this.schema.diffForScope(effectiveForScope, scope, layers);
         const diff: Record<string, unknown> = {};
-        for (const key of Object.keys(rawDiff) as (keyof TFields & string)[]) {
-          const fieldDef = this.schema.fields[key];
-          if (fieldDef?.scopes && !fieldDef.scopes.includes(scope)) {
+        for (const key of Object.keys(rawDiff) as PersistedFieldKeys<TFields>[]) {
+          if (!this.schema.isFieldAllowedInScope(key, scope)) {
             continue;
           }
           diff[key] = rawDiff[key];
@@ -177,6 +182,7 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
       layers,
       provenance,
       warnings,
+      rejectedKeys,
       trustedProject,
       paths: this.getPaths(),
       snapshot,
@@ -208,7 +214,7 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
     this.assertExpectedSnapshot(scope, options.expectedSnapshot, current.snapshot, force);
 
     const normalizedNext = {} as TValues;
-    for (const key of this.schema.fieldKeys) {
+    for (const key of this.schema.persistedFieldKeys) {
       const validation = this.schema.validateField(key, nextValues[key]);
       if (!validation.ok) {
         throw new Error(`Invalid value for setting "${key}": ${validation.error}`);
@@ -218,9 +224,8 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
 
     const rawDiff = this.schema.diffForScope(normalizedNext, scope, current.layers);
     const diff: Record<string, unknown> = {};
-    for (const key of Object.keys(rawDiff) as (keyof TFields & string)[]) {
-      const fieldDef = this.schema.fields[key];
-      if (fieldDef?.scopes && !fieldDef.scopes.includes(scope)) {
+    for (const key of Object.keys(rawDiff) as PersistedFieldKeys<TFields>[]) {
+      if (!this.schema.isFieldAllowedInScope(key, scope)) {
         continue;
       }
       diff[key] = rawDiff[key];
@@ -283,12 +288,17 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
         : cloneValue(current.effective);
     const nextValues = baseValues as TValues;
     for (const [key, rawValue] of Object.entries(partial)) {
-      if (!(key in this.schema.fields)) {
+      if (!Object.prototype.hasOwnProperty.call(this.schema.fields, key)) {
         throw new Error(`Unknown setting key "${key}" for schema "${this.schema.id}".`);
       }
-      const typedKey = key as keyof TFields & string;
-      const fieldDef = this.schema.fields[typedKey];
-      if (fieldDef?.scopes && !fieldDef.scopes.includes(scope)) {
+      const fieldDef = this.schema.fields[key]!;
+      if (!isPersistedFieldDef(fieldDef)) {
+        throw new Error(
+          `Setting "${key}" is not persisted (kind "${fieldDef.kind}") and cannot be patched.`,
+        );
+      }
+      const typedKey = key as PersistedFieldKeys<TFields>;
+      if (!this.schema.isFieldAllowedInScope(typedKey, scope)) {
         throw new Error(
           `Setting "${key}" cannot be saved to "${scope}" scope.`,
         );

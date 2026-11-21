@@ -700,6 +700,8 @@ test("Subpath exports expose all expected symbols across root, /schema, /store, 
 
   assert.equal(schemaPkg.defineSettings, rootPkg.defineSettings);
   assert.equal(schemaPkg.field, rootPkg.field);
+  assert.equal(schemaPkg.isPersistedFieldDef, rootPkg.isPersistedFieldDef);
+  assert.equal(typeof schemaPkg.isPersistedFieldDef, "function");
   assert.equal(typeof schemaPkg.validateFieldValue, "function");
   assert.equal(typeof schemaPkg.parseModelIdentity, "function");
   assert.equal(typeof schemaPkg.formatModelIdentity, "function");
@@ -717,6 +719,12 @@ test("Subpath exports expose all expected symbols across root, /schema, /store, 
   assert.equal(typeof dialogPkg.SelectRoute, "function");
   assert.equal(typeof dialogPkg.MultiSelectRoute, "function");
   assert.equal(typeof dialogPkg.ModelPickerRoute, "function");
+  assert.equal(dialogPkg.TextViewerRoute, rootPkg.TextViewerRoute);
+  assert.equal(typeof dialogPkg.TextViewerRoute, "function");
+  assert.equal(dialogPkg.renderMarkdownToAnsi, rootPkg.renderMarkdownToAnsi);
+  assert.equal(typeof dialogPkg.renderMarkdownToAnsi, "function");
+  assert.equal(dialogPkg.DynamicPickerRoute, rootPkg.DynamicPickerRoute);
+  assert.equal(typeof dialogPkg.DynamicPickerRoute, "function");
 
   assert.equal(adapterPkg.openSettingsDialog, rootPkg.openSettingsDialog);
   assert.equal(adapterPkg.runRpcSettingsMenu, rootPkg.runRpcSettingsMenu);
@@ -1217,4 +1225,174 @@ test("RPC menu passes draft values to format(value, values)", async () => {
   assert.equal(result.closedBy, "cancel");
   assert.ok(rootMenus[0].some((o) => o.includes("Threshold: 10 (fast)")));
   assert.ok(rootMenus[1].some((o) => o.includes("Threshold: 10 (safe)")));
+});
+
+test("RPC mode handles dynamic labels, ineligible rows, out-of-scope rows, view, external, picker, and normalizeDraft", async () => {
+  const rpcRunCalls = [];
+  const schema = defineSettings({
+    id: "rpc-phase1-test",
+    title: "RPC Phase 1 Test",
+    scopes: ["global", "project"],
+    defaultScope: "global",
+    saveMode: "draft",
+    normalizeDraft: (draft, changedKey) => {
+      if (changedKey === "enabled" && !draft.enabled) {
+        return { ...draft, count: 1 };
+      }
+      return draft;
+    },
+    fields: {
+      enabled: field.boolean({
+        label: "Master Enabled",
+        default: true,
+      }),
+      count: field.integer({
+        label: (v) => (v.enabled ? "Active Count" : "Paused Count"),
+        default: 5,
+        min: 1,
+        max: 20,
+        eligible: (v) =>
+          v.enabled ? true : { eligible: false, reason: "Enable Master Enabled to edit Count." },
+      }),
+      globalOnlyFlag: field.boolean({
+        label: "Global Policy",
+        default: true,
+        scopes: ["global"],
+      }),
+      projectOnlyFlag: field.boolean({
+        label: "Project Override",
+        default: false,
+        scopes: ["project"],
+      }),
+      report: field.view({
+        label: "Status View",
+        value: "Read…",
+        content: async ({ scope }) => `Report for ${scope}`,
+      }),
+      extWithRpc: field.external({
+        label: "External Action",
+        summary: async ({ scope }) => `Ready (${scope})`,
+        openSubroute: () => ({ render: () => ["x"], invalidate: () => {} }),
+        rpcRun: async (_ctx, draft, scope) => {
+          rpcRunCalls.push({ enabled: draft.enabled, scope });
+        },
+      }),
+      extTuiOnly: field.external({
+        label: "External TUI Only",
+        openSubroute: () => ({ render: () => ["y"], invalidate: () => {} }),
+      }),
+      profile: field.picker({
+        label: "Profile",
+        default: null,
+        allowClear: true,
+        emptyLabel: "None",
+        loadOptions: async () => [
+          { id: "alpha", value: "alpha", label: "Alpha", badge: "v1" },
+          {
+            id: "locked",
+            value: "locked",
+            label: "Locked",
+            disabled: true,
+            disabledReason: "Profile is locked.",
+          },
+          { id: "bad", value: "bad", label: "Bad Profile" },
+        ],
+        validateSelection: async (opt) =>
+          opt.value === "bad" ? "Bad Profile failed validation." : true,
+      }),
+    },
+  });
+
+  const adapter = createMemoryStorageAdapter();
+  const rootMenus = [];
+
+  const selectQueue = [
+    // 1. Check initial menu (Active Count, [Project only], Ready (global)) -> pick Project Override (blocked)
+    (opts) => {
+      rootMenus.push(opts);
+      return opts.find((o) => o.includes("Project Override:") && o.includes("[Project only]"));
+    },
+    // 2. View report -> notifies loaded content
+    (opts) => opts.find((o) => o.includes("Status View:")),
+    // 3. Run External Action (with rpcRun)
+    (opts) => opts.find((o) => o.includes("External Action: Ready (global)")),
+    // 4. Trigger External TUI Only -> notifies TUI-only
+    (opts) => opts.find((o) => o.includes("External TUI Only:")),
+    // 5. Open Profile picker -> disabled option -> invalid option -> valid Alpha
+    (opts) => opts.find((o) => o.includes("Profile:")),
+    (opts) => opts.find((o) => o.includes("Locked [disabled]")),
+    (opts) => opts.find((o) => o.includes("Bad Profile")),
+    (opts) => opts.find((o) => o.includes("Alpha [v1]")),
+    // 6. Re-open Profile picker -> clear to None -> then re-open & pick Alpha again
+    (opts) => opts.find((o) => o.includes("Profile: alpha")),
+    (opts) => opts.find((o) => o.startsWith("None —")),
+    (opts) => opts.find((o) => o.includes("Profile: None")),
+    (opts) => opts.find((o) => o.includes("Alpha [v1]")),
+    // 7. Toggle Master Enabled to Disabled -> normalizeDraft resets count to 1 & label flips to Paused Count
+    (opts) => opts.find((o) => o.includes("Master Enabled:")),
+    () => "Disabled",
+    // 8. Check menu has "Paused Count: 1 [default] * [unavailable]" and try selecting it (ineligible!)
+    (opts) => {
+      rootMenus.push(opts);
+      return opts.find((o) => o.includes("Paused Count:") && o.includes("[unavailable]"));
+    },
+    // 9. Switch Save scope to Project
+    (opts) => opts.find((o) => o.startsWith("Save scope:")),
+    // 10. Try Global Policy [Global only] -> blocked with warning
+    (opts) => {
+      rootMenus.push(opts);
+      return opts.find((o) => o.includes("Global Policy:") && o.includes("[Global only]"));
+    },
+    // 11. Edit Project Override -> Enabled
+    (opts) => opts.find((o) => o.includes("Project Override:")),
+    () => "Enabled",
+    // 12. Save changes
+    (opts) => opts.find((o) => o.startsWith("Save changes")),
+  ];
+
+  const { ctx, notifications } = createBaseContext({
+    mode: "rpc",
+    hasUI: true,
+    ui: {
+      theme: createMockTheme(),
+      notify: (message, type = "info") => {
+        notifications.push({ message, type });
+      },
+      select: async (_title, options) => {
+        const next = selectQueue.shift();
+        assert.ok(next, `Unexpected RPC select: ${_title}`);
+        return next(options);
+      },
+      input: async () => undefined,
+      editor: async () => undefined,
+      confirm: async () => true,
+      custom: async () => {
+        throw new Error("custom() must not be called in RPC mode");
+      },
+    },
+  });
+
+  const result = await openSettingsDialog(ctx, { schema, adapter });
+  assert.equal(selectQueue.length, 0);
+  assert.equal(result.saved, true);
+  assert.equal(result.scope, "project");
+  assert.equal(result.values.enabled, false);
+  assert.equal(result.values.count, 1); // updated atomically by normalizeDraft
+  assert.equal(result.values.profile, "alpha");
+  assert.equal(result.values.projectOnlyFlag, true);
+  assert.equal("report" in result.values, false);
+  assert.equal("extWithRpc" in result.values, false);
+
+  assert.ok(rootMenus[0].some((o) => o.includes("Active Count: 5")));
+  assert.ok(rootMenus[1].some((o) => o.includes("Paused Count: 1")));
+  assert.ok(rootMenus[2].some((o) => o.includes("Global Policy:") && o.includes("[Global only]")));
+
+  assert.deepEqual(rpcRunCalls, [{ enabled: true, scope: "global" }]);
+  assert.ok(notifications.some((n) => n.type === "info" && n.message === "Report for global"));
+  assert.ok(notifications.some((n) => n.type === "info" && n.message.includes("requires interactive TUI mode")));
+  assert.ok(notifications.some((n) => n.type === "warning" && n.message === "Profile is locked."));
+  assert.ok(notifications.some((n) => n.type === "warning" && n.message === "Bad Profile failed validation."));
+  assert.ok(notifications.some((n) => n.type === "warning" && n.message === "Enable Master Enabled to edit Count."));
+  assert.ok(notifications.some((n) => n.type === "warning" && n.message.includes("Switch Save scope to Project")));
+  assert.ok(notifications.some((n) => n.type === "warning" && n.message.includes("Switch Save scope to Global")));
 });

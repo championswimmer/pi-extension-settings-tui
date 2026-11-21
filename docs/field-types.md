@@ -1,6 +1,10 @@
 # Field Types & Common Options
 
-`pi-extension-settings-tui` provides 8 declarative field builders on `field` (`field.boolean`, `field.enum`, `field.multiSelect`, `field.string`, `field.number`, `field.integer`, `field.model`, and `field.custom<T>`). Each builder returns a strongly typed definition consumed by schema validation, storage diffing, the TUI dialog, and the RPC menu.
+`pi-extension-settings-tui` provides 11 declarative field builders on `field`:
+- **Persisted fields:** `field.boolean`, `field.enum`, `field.multiSelect`, `field.string`, `field.number`, `field.integer`, `field.model`, `field.picker<T>`, and `field.custom<T>`.
+- **Non-persisted action/view fields:** `field.view` and `field.external` (never written to storage and excluded from `InferSettingsValues`).
+
+Each builder returns a strongly typed definition consumed by schema validation, storage diffing, the TUI dialog, and the RPC menu.
 
 > **Related guides:** [Getting Started](getting-started.md) · [Storage & Security](storage-and-security.md) · [TUI, Mouse & RPC](tui-mouse-and-rpc.md) · [Overview](../README.md)
 
@@ -8,22 +12,28 @@
 
 ## Common Field Options
 
-Every field builder accepts these base options (`FieldBase<T, TValues>`):
+Every persisted field builder accepts `FieldBase<T, TValues>` (and `field.view` / `field.external` accept `NonPersistedFieldBase<TValues>`):
 
 | Option | Type | Description |
 | :--- | :--- | :--- |
 | `tab` | `string` | Tab ID from `defineSettings({ tabs })`. Defaults to the first tab (or `"general"` if `tabs` is omitted). Unknown tab IDs throw at schema definition time. |
-| `label` | `string` | Human-readable label shown in the row list and RPC menu. |
+| `label` | `string \| ((values: Readonly<TValues>) => string)` | Human-readable label shown in the row list, sub-route title, and RPC menu. Function form updates live as draft values change. |
 | `description` | `string \| ((values: Readonly<TValues>) => string)` | Help text shown in the bottom help area when the row is selected, and in sub-route headers. For `field.enum`, if omitted, falls back to the currently selected option's `description`. |
-| `default` | `T` | Default value used when neither Global nor Project overrides the key. |
+| `default` | `T` | *(Persisted fields only)* Default value used when neither Global nor Project overrides the key. |
 | `experimental` | `boolean` | When `true`, renders a warning-colored `[lab]` badge next to the field label. |
-| `disabled` | `boolean \| ((values: Readonly<TValues>) => boolean)` | Dims and skips the row in navigation; blocks editing in both TUI and RPC. |
+| `disabled` | `boolean \| string \| ((values: Readonly<TValues>) => boolean \| string)` | `true` hard-disables the row (dims and skips it in navigation). Returning a non-empty `string` keeps the row focusable with soft-disabled eligibility and displays the string as its unavailable reason. |
+| `eligible` | `FieldEligibility \| ((values: Readonly<TValues>) => FieldEligibility)` | `FieldEligibility` is `boolean \| { readonly eligible: boolean; readonly reason?: string }`. When `false` or `{ eligible: false, reason }`, the row stays focusable, shows `reason` in the help area, and displays a warning banner on `Enter`/`Space`/`←`/`→`/click (or RPC selection) without mutating the field. |
 | `visibleWhen` | `(values: Readonly<TValues>) => boolean` | Dynamically hides or shows the field based on current draft values. |
 | `format` | `(value: T, values?: Readonly<TValues>) => string` | Custom display formatter for the row's right-hand value column and RPC menu. Receives current draft `values` as an optional second argument. |
 | `tone` | `ValueTone \| ((value: T, values?: Readonly<TValues>) => ValueTone)` | Theme color hint for the rendered value: `"default"`, `"accent"`, `"warn"`, `"error"`, `"success"`, or `"muted"`. Function form receives current draft `values` as an optional second argument. |
 | `scopes` | `readonly ("global" \| "project")[]` | Restricts which scopes may persist or edit this field. Disallowed keys in a scope file are ignored with a warning on load and skipped during diff/save. |
 
-Example using common options:
+### Scope-Aware UI Behavior & `normalizeDraft`
+
+- **Scope-aware rows:** When a field defines `scopes` (e.g. `scopes: ["global"]`) and the dialog's active scope is `"project"` (or vice versa), the row remains focusable, displays `[Global only]` or `[Project only]`, and shows a scope-switch warning banner if edited instead of silently dropping changes.
+- **Cross-field normalization (`defineSettings({ normalizeDraft })`):** Supply `normalizeDraft(draft, changedKey, prev)` on `defineSettings` to normalize dependent fields atomically whenever any persisted field commits in TUI or RPC mode. Any fields changed by `normalizeDraft` are automatically re-validated against their field definitions.
+
+Example using common options, `eligible`, dynamic `label`, and `normalizeDraft`:
 
 ```ts
 import { defineSettings, field } from "pi-extension-settings-tui";
@@ -37,6 +47,12 @@ interface MyValues extends Record<string, unknown> {
 const schema = defineSettings({
   id: "common-options-demo",
   title: "Common Options Demo",
+  normalizeDraft: (draft, changedKey) => {
+    if (changedKey === "mode" && draft.mode === "off") {
+      return { ...draft, strictThreshold: 80 };
+    }
+    return draft;
+  },
   fields: {
     mode: field.enum({
       label: "Mode",
@@ -48,15 +64,18 @@ const schema = defineSettings({
       ],
     }),
     strictThreshold: field.integer<MyValues>({
-      label: "Strict threshold",
-      description: "Only visible when Mode is not Off; disabled unless Mode is Strict.",
+      label: (values) => (values.mode === "strict" ? "Strict threshold (active)" : "Strict threshold"),
+      description: "Only visible when Mode is not Off; eligible only when Mode is Strict.",
       default: 80,
       min: 0,
       max: 100,
       unit: "%",
       experimental: true,
       visibleWhen: (values) => values.mode !== "off",
-      disabled: (values) => values.mode !== "strict",
+      eligible: (values) =>
+        values.mode === "strict"
+          ? true
+          : { eligible: false, reason: "Switch Mode to Strict to customize this threshold." },
       tone: (val) => (val >= 90 ? "warn" : "accent"),
     }),
     globalEndpoint: field.string({
@@ -103,12 +122,13 @@ const enabled = field.boolean({
   - `"auto"` *(default)*: Cycles inline on `Enter`/`Space` when `options.length <= 3`; opens a searchable `SelectRoute` picker when `options.length > 3`.
   - `"cycle"`: Always cycles inline on `Enter`/`Space`.
   - `"picker"`: Always opens `SelectRoute` (with `/` fuzzy filter and option descriptions).
-  - Note: Pressing `←` / `→` on a selected enum row always steps through options inline regardless of `display`.
+  - Note: Pressing `←` / `→` on a selected enum row steps through options inline when `allowInlineStep` is enabled (defaults to `display !== "picker"`).
 
 | Specific Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `options` | `readonly EnumOption<T>[]` | *(required)* | Array of `{ value: T, label: string, description?: string, tone?: ValueTone }`. |
 | `display` | `"auto" \| "cycle" \| "picker"` | `"auto"` | Controls whether activating the row cycles inline or pushes `SelectRoute`. |
+| `allowInlineStep` | `boolean` | `display !== "picker"` | Whether `←` / `→` arrows step through options inline on the root row. |
 
 ```ts
 const logLevel = field.enum({
@@ -318,9 +338,98 @@ const schema = defineSettings({
 
 ---
 
-## 7. `field.custom<T>`
+## 7. `field.picker<T>`
 
-`field.custom<T>` is an escape hatch for domain-specific values and pickers (for example, choosing a model, agent profile, or structured rule) that don't fit the built-in routes.
+Searchable single-select sub-route (`DynamicPickerRoute`) backed by a sync or async option loader, optional groups, badges, disabled-reason feedback, clear-to-empty support, and async selection validation.
+
+- **TypeScript type:** `T`
+- **TUI & RPC interaction:** Opens `DynamicPickerRoute` (or an interactive RPC select loop) with fuzzy search, optional `Ctrl+R` refresh, inline `Disabled: <reason>` preview and error banner for disabled options, and async `validateSelection` checks before committing.
+
+| Specific Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `loadOptions` | `(ctx: PickerLoadContext<TValues>) => readonly DynamicPickerOption<T>[] \| Promise<...>` | *(required)* | Sync or async loader receiving `{ draft, scope, signal }`. Each option has `{ id, value, label, description?, group?, badge?, badgeTone?, tone?, disabled?, disabledReason? }`. |
+| `allowClear` | `boolean` | `false` | Adds a clear row at the top of the list resetting to `clearValue ?? null`. |
+| `clearValue` | `T` | `null` | Value committed when the clear row is selected. |
+| `emptyLabel` | `string` | `"None"` | Display text when cleared and label for the clear row. |
+| `emptyDescription` | `string` | `"Clear selection"` | Description shown on the clear row. |
+| `searchable` | `boolean` | `true` | Enables fuzzy filtering (`/` search box in TUI; text filter action in RPC). |
+| `refreshable` | `boolean` | `true` | Enables `Ctrl+R` / `[Ctrl+R Refresh]` (TUI) and `Refresh options` (RPC). |
+| `validate` | `(raw: unknown) => boolean \| string` | — | Persisted value validator run on load, save, and commit. |
+| `normalize` | `(raw: unknown) => T` | — | Optional normalizer called after `validate` succeeds. |
+| `validateSelection` | `(option: DynamicPickerOption<T>, ctx: PickerLoadContext<TValues>) => boolean \| string \| Promise<boolean \| string>` | — | Async or sync pre-commit validation on the chosen option; failures display an inline banner without closing the picker. |
+| `equals` | `(a: T, b: T) => boolean` | `deepEqual` | Custom equality comparator for dirty tracking, diffing, and highlighting `(current)`. |
+
+```ts
+const profile = field.picker<string | null>({
+  tab: "general",
+  label: "Active profile",
+  description: "Select a remote environment profile.",
+  default: null,
+  allowClear: true,
+  emptyLabel: "Default profile",
+  loadOptions: async ({ signal }) => fetchProfiles({ signal }),
+  validateSelection: async (opt) =>
+    opt.id.startsWith("deprecated-") ? "This profile is deprecated." : true,
+});
+```
+
+---
+
+## 8. `field.view`
+
+Non-persisted read-only viewer (`TextViewerRoute`) for displaying static or async-loaded Markdown or plain text (e.g., diagnostics, documentation, or generated status summaries). Never written to storage.
+
+| Specific Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `content` | `string \| ((ctx: ViewContentContext<TValues>) => string \| Promise<string>)` | *(required)* | Static text or async loader receiving `{ draft, scope, signal }`. |
+| `format` | `"markdown" \| "plain"` | `"markdown"` | Renders Markdown headings, bold/italic, inline/fenced code, lists, quotes, and rules via `renderMarkdownToAnsi`, or wrapped plain text. |
+| `value` | `string \| ((values: Readonly<TValues>) => string)` | `"View ›"` | Optional right-hand summary text rendered on the settings row. |
+| `refreshable` | `boolean` | `true` | Enables `Ctrl+R` / `[Ctrl+R Refresh]` when `content` is a function. |
+
+```ts
+const diagnostics = field.view({
+  tab: "advanced",
+  label: "Diagnostics report",
+  description: "Inspect live extension status (read-only).",
+  value: "Inspect…",
+  format: "markdown",
+  content: async ({ draft, scope }) =>
+    `# Status (${scope})\n\n- Enabled: **${Boolean(draft.enabled)}**`,
+});
+```
+
+---
+
+## 9. `field.external`
+
+Non-persisted action row that launches an extension-supplied TUI sub-route (synchronously or asynchronously with automatic `LoadingRoute` + `Esc` abort) and displays an optional live sync/async summary on the root row. Never written to storage.
+
+| Specific Option | Type | Description |
+| :--- | :--- | :--- |
+| `summary` | `string \| ((ctx: ExternalSummaryContext<TValues>) => ExternalSummaryResult \| Promise<ExternalSummaryResult>)` | Static string or async summary returning `string \| { text, tone? }`. Shows `"…"` while loading and automatically refreshes after `close()`. |
+| `openSubroute` | `(params: ExternalSubrouteParams<TValues>) => unknown \| Promise<unknown>` | Sync or async factory returning a `Component & Focusable` (with optional `title`, `handleMouse`, `dispose`). Receives `{ fieldKey, field, draft, scope, tui, theme, keybindings, signal, getMaxHeight, requestRender, close }`. |
+| `rpcRun` | `(ctx: unknown, draft: Readonly<TValues>, scope: SettingsScope) => Promise<void>` | Optional RPC handler invoked when `ctx.mode === "rpc"`. If omitted, RPC mode notifies `"<label> requires interactive TUI mode."`. |
+
+```ts
+const providers = field.external({
+  tab: "general",
+  label: "Connected accounts",
+  description: "Manage external credentials outside settings.json.",
+  summary: async ({ scope }) => ({ text: `2 active (${scope})`, tone: "success" }),
+  openSubroute: async (params) => {
+    const accounts = await loadAccounts(params.signal);
+    return createAccountsRoute(accounts, {
+      onDone: (msg) => params.close({ saved: true, message: msg, tone: "success" }),
+    });
+  },
+});
+```
+
+---
+
+## 10. `field.custom<T>`
+
+`field.custom<T>` is an escape hatch for persisted domain-specific values and pickers that don't fit the built-in routes.
 
 | Specific Option | Type | Description |
 | :--- | :--- | :--- |
@@ -336,10 +445,16 @@ When the user activates a `field.custom` row in TUI mode, `openSubroute` receive
 - `fieldKey`: `string`
 - `field`: `CustomFieldDef<T, TValues>`
 - `value`: `T` (deep-cloned current value)
-- `draft`: `Readonly<TValues>` (deep-cloned current draft values across all fields)
+- `draft`: `Readonly<TValues>` (deep-cloned current draft values across all persisted fields)
+- `scope`: `SettingsScope` (`"global"` or `"project"`)
 - `tui`, `theme`, `keybindings`
-- `commit(next: T)`: validates, pops the sub-route, and updates the draft (or persists immediately in `immediate` mode)
-- `cancel()`: pops the sub-route without changing the value
+- `signal`: `AbortSignal` (aborted automatically if the sub-route is popped or cancelled)
+- `getMaxHeight()`: returns the current body height budget in rows for the active sub-route frame
+- `requestRender()`: triggers a TUI re-render from async sub-route updates
+- `commit(next: T)`: validates, runs `normalizeDraft`, pops the sub-route, and updates the draft (or persists immediately in `immediate` mode)
+- `commitFields(patch: Partial<TValues>)`: validates every field in `patch`, enforces scope rules, runs `normalizeDraft`, pops the sub-route, and atomically commits multiple persisted fields together
+- `notify(message: string, tone?: DialogNotificationTone)`: displays a status banner (`"info" | "success" | "warn" | "error"`) in the dialog
+- `cancel()`: pops the sub-route without changing values
 
 ### Full Example: Custom `Component & Focusable` Sub-Route + `rpcEdit`
 

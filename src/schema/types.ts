@@ -2,6 +2,16 @@ export type SettingsScope = "global" | "project";
 export type FieldProvenance = "default" | "global" | "project" | "both";
 export type SaveMode = "draft" | "immediate";
 export type ValueTone = "default" | "accent" | "warn" | "error" | "success" | "muted";
+export type DialogNotificationTone = "info" | "success" | "warn" | "error";
+
+export type FieldEligibility =
+  | boolean
+  | { readonly eligible: boolean; readonly reason?: string };
+
+export interface ResolvedFieldEligibility {
+  readonly eligible: boolean;
+  readonly reason?: string;
+}
 
 export const MODEL_THINKING_LEVELS = [
   "off",
@@ -66,13 +76,28 @@ export interface MultiSelectOption<T extends string = string> {
   readonly group?: string;
 }
 
+export interface NonPersistedFieldBase<
+  TValues extends Record<string, unknown> = Record<string, unknown>,
+> {
+  readonly tab?: string;
+  readonly label: string | ((values: Readonly<TValues>) => string);
+  readonly description?: string | ((values: Readonly<TValues>) => string);
+  readonly experimental?: boolean;
+  readonly disabled?: boolean | string | ((values: Readonly<TValues>) => boolean | string);
+  readonly eligible?: FieldEligibility | ((values: Readonly<TValues>) => FieldEligibility);
+  readonly visibleWhen?: (values: Readonly<TValues>) => boolean;
+  readonly tone?: ValueTone | ((values: Readonly<TValues>) => ValueTone);
+  readonly scopes?: readonly SettingsScope[];
+}
+
 export interface FieldBase<T, TValues extends Record<string, unknown> = Record<string, unknown>> {
   readonly tab?: string;
-  readonly label: string;
+  readonly label: string | ((values: Readonly<TValues>) => string);
   readonly description?: string | ((values: Readonly<TValues>) => string);
   readonly default: T;
   readonly experimental?: boolean;
-  readonly disabled?: boolean | ((values: Readonly<TValues>) => boolean);
+  readonly disabled?: boolean | string | ((values: Readonly<TValues>) => boolean | string);
+  readonly eligible?: FieldEligibility | ((values: Readonly<TValues>) => FieldEligibility);
   readonly visibleWhen?: (values: Readonly<TValues>) => boolean;
   readonly format?: (value: T, values?: Readonly<TValues>) => string;
   readonly tone?: ValueTone | ((value: T, values?: Readonly<TValues>) => ValueTone);
@@ -93,6 +118,8 @@ export interface EnumFieldDef<
   readonly kind: "enum";
   readonly options: readonly EnumOption<T>[];
   readonly display?: "auto" | "cycle" | "picker";
+  /** Whether Left/Right arrows step inline on the row. Defaults to `display !== "picker"`. */
+  readonly allowInlineStep?: boolean;
 }
 
 export interface MultiSelectFieldDef<
@@ -178,6 +205,116 @@ export interface ModelFieldDef<
   readonly scopedModels?: readonly ScopedModelEntry[] | ((context?: unknown) => readonly ScopedModelEntry[]);
 }
 
+export interface ViewContentContext<
+  TValues extends Record<string, unknown> = Record<string, unknown>,
+> {
+  readonly draft: Readonly<TValues>;
+  readonly scope: SettingsScope;
+  readonly signal: AbortSignal;
+}
+
+export interface ViewFieldDef<
+  TValues extends Record<string, unknown> = Record<string, unknown>,
+> extends NonPersistedFieldBase<TValues> {
+  readonly kind: "view";
+  /** Optional right-hand summary text rendered on the settings row (e.g. `"Inspect…"`). */
+  readonly value?: string | ((values: Readonly<TValues>) => string);
+  /** Content rendering mode. Defaults to `"markdown"`. */
+  readonly format?: "markdown" | "plain";
+  readonly content: string | ((ctx: ViewContentContext<TValues>) => string | Promise<string>);
+  /** Whether the viewer route exposes a refresh action. Defaults to `true`. */
+  readonly refreshable?: boolean;
+}
+
+export interface ExternalSummaryContext<
+  TValues extends Record<string, unknown> = Record<string, unknown>,
+> {
+  readonly draft: Readonly<TValues>;
+  readonly scope: SettingsScope;
+  readonly signal: AbortSignal;
+}
+
+export type ExternalSummaryResult =
+  | string
+  | { readonly text: string; readonly tone?: ValueTone };
+
+export interface ExternalSubrouteCloseResult {
+  readonly saved?: boolean;
+  readonly message?: string;
+  readonly tone?: DialogNotificationTone;
+}
+
+export interface ExternalSubrouteParams<
+  TValues extends Record<string, unknown> = Record<string, unknown>,
+> {
+  readonly fieldKey: string;
+  readonly field: ExternalFieldDef<TValues>;
+  readonly draft: Readonly<TValues>;
+  readonly scope: SettingsScope;
+  readonly tui: unknown;
+  readonly theme: unknown;
+  readonly keybindings: unknown;
+  readonly signal: AbortSignal;
+  readonly getMaxHeight: () => number;
+  readonly requestRender: () => void;
+  readonly close: (result?: ExternalSubrouteCloseResult) => void;
+}
+
+export interface ExternalFieldDef<
+  TValues extends Record<string, unknown> = Record<string, unknown>,
+> extends NonPersistedFieldBase<TValues> {
+  readonly kind: "external";
+  readonly summary?:
+    | string
+    | ((ctx: ExternalSummaryContext<TValues>) => ExternalSummaryResult | Promise<ExternalSummaryResult>);
+  readonly openSubroute: (params: ExternalSubrouteParams<TValues>) => unknown | Promise<unknown>;
+  readonly rpcRun?: (ctx: unknown, draft: Readonly<TValues>, scope: SettingsScope) => Promise<void>;
+}
+
+export interface DynamicPickerOption<T = unknown> {
+  readonly id: string;
+  readonly value: T;
+  readonly label: string;
+  readonly description?: string;
+  readonly group?: string;
+  readonly badge?: string;
+  readonly badgeTone?: ValueTone;
+  readonly tone?: ValueTone;
+  readonly disabled?: boolean;
+  readonly disabledReason?: string;
+}
+
+export interface PickerLoadContext<
+  TValues extends Record<string, unknown> = Record<string, unknown>,
+> {
+  readonly draft: Readonly<TValues>;
+  readonly scope: SettingsScope;
+  readonly signal: AbortSignal;
+}
+
+export interface PickerFieldDef<
+  T = unknown,
+  TValues extends Record<string, unknown> = Record<string, unknown>,
+> extends FieldBase<T, TValues> {
+  readonly kind: "picker";
+  readonly loadOptions: (
+    ctx: PickerLoadContext<TValues>,
+  ) => readonly DynamicPickerOption<T>[] | Promise<readonly DynamicPickerOption<T>[]>;
+  readonly allowClear?: boolean;
+  readonly clearValue?: T;
+  readonly emptyLabel?: string;
+  readonly emptyDescription?: string;
+  readonly searchable?: boolean;
+  readonly refreshable?: boolean;
+  readonly validate?: (raw: unknown) => boolean | string;
+  readonly normalize?: (raw: unknown) => T;
+  readonly validateSelection?: (
+    option: DynamicPickerOption<T>,
+    ctx: PickerLoadContext<TValues>,
+  ) => boolean | string | Promise<boolean | string>;
+  readonly equals?: (a: T, b: T) => boolean;
+}
+
 export interface CustomSubrouteParams<
   T = unknown,
   TValues extends Record<string, unknown> = Record<string, unknown>,
@@ -186,10 +323,16 @@ export interface CustomSubrouteParams<
   readonly field: CustomFieldDef<T, TValues>;
   readonly value: T;
   readonly draft: Readonly<TValues>;
+  readonly scope: SettingsScope;
   readonly tui: unknown;
   readonly theme: unknown;
   readonly keybindings: unknown;
+  readonly signal: AbortSignal;
+  readonly getMaxHeight: () => number;
+  readonly requestRender: () => void;
   readonly commit: (next: T) => void;
+  readonly commitFields: (patch: Partial<TValues>) => void;
+  readonly notify: (message: string, tone?: DialogNotificationTone) => void;
   readonly cancel: () => void;
 }
 
@@ -205,16 +348,27 @@ export interface CustomFieldDef<
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type AnyFieldDef =
+export type PersistedFieldDef =
   | BooleanFieldDef<any>
   | EnumFieldDef<any, any>
   | MultiSelectFieldDef<any, any>
   | StringFieldDef<any>
   | NumberFieldDef<any>
   | ModelFieldDef<any, any, any>
+  | PickerFieldDef<any, any>
   | CustomFieldDef<any, any>;
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type NonPersistedFieldDef = ViewFieldDef<any> | ExternalFieldDef<any>;
+
+export type AnyFieldDef = PersistedFieldDef | NonPersistedFieldDef;
+
 export type FieldMap = Record<string, AnyFieldDef>;
+
+export type PersistedFieldKeys<TFields extends FieldMap> = {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  [K in keyof TFields]: TFields[K] extends ViewFieldDef<any> | ExternalFieldDef<any> ? never : K;
+}[keyof TFields] & string;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type InferFieldValue<F> =
@@ -225,11 +379,12 @@ export type InferFieldValue<F> =
   F extends NumberFieldDef<any> ? number :
   F extends ModelFieldDef<infer TAllowClear, any, infer TIncludeThinking>
     ? ModelFieldValue<TAllowClear, TIncludeThinking> :
+  F extends PickerFieldDef<infer T, any> ? T :
   F extends CustomFieldDef<infer T, any> ? T :
   never;
 
 export type InferSettingsValues<TFields extends FieldMap> = {
-  [K in keyof TFields]: InferFieldValue<TFields[K]>;
+  [K in PersistedFieldKeys<TFields>]: InferFieldValue<TFields[K]>;
 };
 
 export interface StoragePathContext {
@@ -263,6 +418,11 @@ export interface SettingsSchemaConfig<TFields extends FieldMap> {
   readonly tabs?: readonly TabDefinition[];
   readonly storage?: StoragePathConfig;
   readonly migrate?: (raw: Record<string, unknown>, scope: SettingsScope) => Record<string, unknown>;
+  readonly normalizeDraft?: (
+    draft: InferSettingsValues<NoInfer<TFields>>,
+    changedKey: PersistedFieldKeys<NoInfer<TFields>>,
+    prev: InferSettingsValues<NoInfer<TFields>>,
+  ) => InferSettingsValues<NoInfer<TFields>>;
   readonly fields: TFields;
 }
 
@@ -309,12 +469,22 @@ export interface SettingsSchema<TFields extends FieldMap = FieldMap> {
   readonly storage: StoragePathConfig;
   readonly fields: TFields;
   readonly fieldKeys: readonly (keyof TFields & string)[];
+  readonly persistedFieldKeys: readonly PersistedFieldKeys<TFields>[];
   readonly defaults: InferSettingsValues<TFields>;
   readonly Type: InferSettingsValues<TFields>;
+  readonly normalizeDraft?: (
+    draft: InferSettingsValues<TFields>,
+    changedKey: PersistedFieldKeys<TFields>,
+    prev: InferSettingsValues<TFields>,
+  ) => InferSettingsValues<TFields>;
 
   getDefaults(): InferSettingsValues<TFields>;
   getFieldsForTab(tabId: string): readonly { key: keyof TFields & string; def: AnyFieldDef }[];
-  validateField<K extends keyof TFields & string>(key: K, raw: unknown): ValidationResult<InferSettingsValues<TFields>[K]>;
+  isFieldAllowedInScope<K extends keyof TFields & string>(key: K, scope: SettingsScope): boolean;
+  validateField<K extends PersistedFieldKeys<TFields>>(
+    key: K,
+    raw: unknown,
+  ): ValidationResult<InferSettingsValues<TFields>[K]>;
   validatePartial(raw: unknown): PartialValidationResult<InferSettingsValues<TFields>>;
   resolveEffective(
     layers: SettingsLayersData<InferSettingsValues<TFields>>,
@@ -323,24 +493,36 @@ export interface SettingsSchema<TFields extends FieldMap = FieldMap> {
   computeProvenance(
     layers: SettingsLayersData<InferSettingsValues<TFields>>,
     options?: { includeProject?: boolean },
-  ): Record<keyof TFields & string, FieldProvenance>;
+  ): Record<PersistedFieldKeys<TFields>, FieldProvenance>;
   diffForScope(
     nextValues: InferSettingsValues<TFields>,
     scope: SettingsScope,
     existingLayers: SettingsLayersData<InferSettingsValues<TFields>>,
   ): Partial<InferSettingsValues<TFields>>;
+  getFieldLabel<K extends keyof TFields & string>(
+    key: K,
+    values?: Readonly<InferSettingsValues<TFields>>,
+  ): string;
   getFieldDescription<K extends keyof TFields & string>(
     key: K,
     values?: Readonly<InferSettingsValues<TFields>>,
   ): string | undefined;
+  getFieldEligibility<K extends keyof TFields & string>(
+    key: K,
+    values?: Readonly<InferSettingsValues<TFields>>,
+  ): ResolvedFieldEligibility;
+  isFieldHardDisabled<K extends keyof TFields & string>(
+    key: K,
+    values?: Readonly<InferSettingsValues<TFields>>,
+  ): boolean;
   formatFieldValue<K extends keyof TFields & string>(
     key: K,
-    value: InferSettingsValues<TFields>[K],
+    value: K extends PersistedFieldKeys<TFields> ? InferSettingsValues<TFields>[K] : unknown,
     values?: Readonly<InferSettingsValues<TFields>>,
   ): string;
   getFieldTone<K extends keyof TFields & string>(
     key: K,
-    value: InferSettingsValues<TFields>[K],
+    value: K extends PersistedFieldKeys<TFields> ? InferSettingsValues<TFields>[K] : unknown,
     values?: Readonly<InferSettingsValues<TFields>>,
   ): ValueTone;
 }

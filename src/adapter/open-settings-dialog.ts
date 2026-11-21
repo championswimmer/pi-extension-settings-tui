@@ -6,6 +6,7 @@ import type {
   FieldProvenance,
   InferSettingsValues,
   ModelPickerEntry,
+  PersistedFieldKeys,
   ScopedModelEntry,
   SettingsSchema,
   SettingsScope,
@@ -125,7 +126,7 @@ export async function openSettingsDialog<TFields extends FieldMap>(
       next: InferSettingsValues<TFields>,
       meta: {
         scope: SettingsScope;
-        provenance: Record<keyof TFields & string, FieldProvenance>;
+        provenance: Record<PersistedFieldKeys<TFields>, FieldProvenance>;
         writtenKeys: string[];
       },
     ): Promise<void> => {

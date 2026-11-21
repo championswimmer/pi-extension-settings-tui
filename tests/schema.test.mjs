@@ -10,6 +10,7 @@ import {
   findSecretKeys,
   formatModelIdentity,
   getSupportedThinkingLevelsForModel,
+  isPersistedFieldDef,
   parseModelIdentity,
   stripControlChars,
   validateFieldValue,
@@ -959,4 +960,278 @@ test("field.model with includeThinking: false validates, formats, and diffs stri
     ),
     {},
   );
+});
+
+test("dynamic label, getFieldLabel, eligibility framework, and isFieldHardDisabled", () => {
+  const schema = defineSettings({
+    id: "eligibility-ext",
+    title: "Eligibility",
+    fields: {
+      enabled: field.boolean({
+        label: "Master switch",
+        default: true,
+      }),
+      mode: field.enum({
+        label: (v) => (v.enabled ? "Active Mode" : "Mode (inactive)"),
+        default: "fast",
+        allowInlineStep: false,
+        display: "picker",
+        options: [
+          { value: "fast", label: "Fast" },
+          { value: "safe", label: "Safe" },
+        ],
+      }),
+      strictOnly: field.boolean({
+        label: "Strict Only",
+        default: false,
+        eligible: (v) =>
+          v.mode === "safe"
+            ? true
+            : { eligible: false, reason: "Requires Safe mode" },
+      }),
+      boolIneligible: field.boolean({
+        label: "Bool Ineligible",
+        default: false,
+        eligible: false,
+      }),
+      stringDisabled: field.boolean({
+        label: "String Disabled",
+        default: false,
+        disabled: (v) => (v.enabled ? false : "Enable master switch first"),
+      }),
+      hardDisabled: field.boolean({
+        label: "Hard Disabled",
+        default: false,
+        disabled: true,
+      }),
+      dynamicHardDisabled: field.boolean({
+        label: "Dynamic Hard Disabled",
+        default: false,
+        disabled: (v) => !v.enabled,
+      }),
+      bothBlocked: field.boolean({
+        label: "Both Blocked",
+        default: false,
+        eligible: { eligible: false, reason: "From eligible" },
+        disabled: "From disabled",
+      }),
+      emptyStringDisabled: field.boolean({
+        label: "Empty String Disabled",
+        default: false,
+        disabled: "",
+      }),
+    },
+  });
+
+  // Dynamic labels
+  assert.equal(schema.getFieldLabel("enabled"), "Master switch");
+  assert.equal(schema.getFieldLabel("mode"), "Active Mode");
+  assert.equal(
+    schema.getFieldLabel("mode", { ...schema.getDefaults(), enabled: false }),
+    "Mode (inactive)",
+  );
+  assert.equal(schema.getFieldLabel("nonexistent"), "nonexistent");
+
+  // Enum allowInlineStep preserved
+  assert.equal(schema.fields.mode.allowInlineStep, false);
+
+  // Eligibility evaluation
+  assert.deepEqual(schema.getFieldEligibility("enabled"), { eligible: true });
+  assert.deepEqual(schema.getFieldEligibility("strictOnly"), {
+    eligible: false,
+    reason: "Requires Safe mode",
+  });
+  assert.deepEqual(
+    schema.getFieldEligibility("strictOnly", { ...schema.getDefaults(), mode: "safe" }),
+    { eligible: true },
+  );
+  assert.deepEqual(schema.getFieldEligibility("boolIneligible"), { eligible: false });
+
+  // String disabled -> ineligible with reason, NOT hard disabled
+  assert.deepEqual(schema.getFieldEligibility("stringDisabled"), { eligible: true });
+  assert.equal(schema.isFieldHardDisabled("stringDisabled"), false);
+  const offDraft = { ...schema.getDefaults(), enabled: false };
+  assert.deepEqual(schema.getFieldEligibility("stringDisabled", offDraft), {
+    eligible: false,
+    reason: "Enable master switch first",
+  });
+  assert.equal(schema.isFieldHardDisabled("stringDisabled", offDraft), false);
+
+  // Boolean disabled: true -> hard disabled, getFieldEligibility remains { eligible: true }
+  assert.equal(schema.isFieldHardDisabled("hardDisabled"), true);
+  assert.deepEqual(schema.getFieldEligibility("hardDisabled"), { eligible: true });
+
+  // Dynamic boolean disabled
+  assert.equal(schema.isFieldHardDisabled("dynamicHardDisabled"), false);
+  assert.equal(schema.isFieldHardDisabled("dynamicHardDisabled", offDraft), true);
+
+  // eligible takes precedence over string disabled
+  assert.deepEqual(schema.getFieldEligibility("bothBlocked"), {
+    eligible: false,
+    reason: "From eligible",
+  });
+
+  // Empty string disabled is treated as eligible & not hard-disabled
+  assert.deepEqual(schema.getFieldEligibility("emptyStringDisabled"), { eligible: true });
+  assert.equal(schema.isFieldHardDisabled("emptyStringDisabled"), false);
+
+  // Unknown key
+  assert.deepEqual(schema.getFieldEligibility("unknown"), { eligible: false });
+  assert.equal(schema.isFieldHardDisabled("unknown"), false);
+});
+
+test("field.view, field.external, field.picker, isPersistedFieldDef, scope helpers, and normalizeDraft", () => {
+  const viewDef = field.view({
+    label: (v) => `Preview (${v.enabled ? "on" : "off"})`,
+    value: (v) => (v.enabled ? "Ready" : "Paused"),
+    format: "markdown",
+    content: "# Preview",
+    refreshable: true,
+    scopes: ["global"],
+    tone: (v) => (v.enabled ? "accent" : "muted"),
+  });
+
+  const externalDef = field.external({
+    label: "Manage Rules",
+    summary: "3 rules",
+    openSubroute: () => null,
+    scopes: ["project"],
+  });
+
+  const pickerDef = field.picker({
+    label: "Profile",
+    default: null,
+    allowClear: true,
+    emptyLabel: "Default profile",
+    loadOptions: () => [
+      { id: "fast", value: { id: "fast", ver: 1 }, label: "Fast" },
+    ],
+    validate: (raw) =>
+      raw === null ||
+      (typeof raw === "object" && raw !== null && typeof raw.id === "string") ||
+      "Expected profile object or null",
+    normalize: (raw) => (raw === null ? null : { id: raw.id.trim(), ver: raw.ver ?? 1 }),
+    equals: (a, b) => (a?.id ?? null) === (b?.id ?? null),
+  });
+
+  assert.equal(isPersistedFieldDef(viewDef), false);
+  assert.equal(isPersistedFieldDef(externalDef), false);
+  assert.equal(isPersistedFieldDef(pickerDef), true);
+
+  const schema = defineSettings({
+    id: "v05-fields",
+    title: "v0.5 Fields",
+    scopes: ["global", "project"],
+    normalizeDraft(draft, changedKey) {
+      if (changedKey === "enabled" && !draft.enabled) {
+        return { ...draft, profile: null };
+      }
+      return draft;
+    },
+    fields: {
+      enabled: field.boolean({ label: "Enabled", default: true }),
+      profile: pickerDef,
+      preview: viewDef,
+      rules: externalDef,
+    },
+  });
+
+  // fieldKeys includes all; persistedFieldKeys excludes view and external
+  assert.deepEqual(schema.fieldKeys, ["enabled", "profile", "preview", "rules"]);
+  assert.deepEqual(schema.persistedFieldKeys, ["enabled", "profile"]);
+  assert.deepEqual(schema.getDefaults(), { enabled: true, profile: null });
+  assert.equal("preview" in schema.defaults, false);
+  assert.equal("rules" in schema.defaults, false);
+
+  // getFieldsForTab includes all fields for UI rendering
+  assert.deepEqual(
+    schema.getFieldsForTab("general").map((entry) => entry.key),
+    ["enabled", "profile", "preview", "rules"],
+  );
+
+  // isFieldAllowedInScope
+  assert.equal(schema.isFieldAllowedInScope("enabled", "global"), true);
+  assert.equal(schema.isFieldAllowedInScope("enabled", "project"), true);
+  assert.equal(schema.isFieldAllowedInScope("preview", "global"), true);
+  assert.equal(schema.isFieldAllowedInScope("preview", "project"), false);
+  assert.equal(schema.isFieldAllowedInScope("rules", "global"), false);
+  assert.equal(schema.isFieldAllowedInScope("rules", "project"), true);
+  assert.equal(schema.isFieldAllowedInScope("unknown", "global"), false);
+
+  // Picker validation, normalization, formatting, tone, and custom equals in diffForScope
+  assert.deepEqual(schema.validateField("profile", { id: "  fast  " }), {
+    ok: true,
+    value: { id: "fast", ver: 1 },
+  });
+  assert.deepEqual(schema.validateField("profile", 123), {
+    ok: false,
+    error: "Expected profile object or null",
+  });
+  assert.equal(schema.formatFieldValue("profile", null), "Default profile");
+  assert.equal(schema.getFieldTone("profile", null), "muted");
+  assert.equal(schema.getFieldTone("profile", { id: "fast", ver: 1 }), "accent");
+
+  // Custom equals treats { id: "fast", ver: 2 } as equal to global { id: "fast", ver: 1 }
+  assert.deepEqual(
+    schema.diffForScope(
+      { enabled: true, profile: { id: "fast", ver: 2 } },
+      "project",
+      { global: { profile: { id: "fast", ver: 1 } }, project: {} },
+    ),
+    {},
+  );
+
+  // Non-persisted fields fail validation and are rejected in validatePartial
+  assert.equal(validateFieldValue(viewDef, "anything").ok, false);
+  assert.equal(validateFieldValue(externalDef, "anything").ok, false);
+  assert.equal(schema.validateField("preview", "anything").ok, false);
+  const partialRes = schema.validatePartial({
+    enabled: false,
+    preview: "should-reject",
+    rules: "should-reject",
+  });
+  assert.deepEqual(partialRes.values, { enabled: false });
+  assert.deepEqual(partialRes.rejectedKeys.sort(), ["preview", "rules"]);
+
+  // resolveEffective and computeProvenance exclude view and external
+  const eff = schema.resolveEffective({ global: { enabled: false }, project: {} });
+  assert.deepEqual(eff, { enabled: false, profile: null });
+  const prov = schema.computeProvenance({ global: { enabled: false }, project: {} });
+  assert.deepEqual(prov, { enabled: "global", profile: "default" });
+
+  // Format and tone for view/external
+  assert.equal(schema.getFieldLabel("preview"), "Preview (on)");
+  assert.equal(schema.formatFieldValue("preview", undefined), "Ready");
+  assert.equal(schema.getFieldTone("preview", undefined), "accent");
+  assert.equal(
+    schema.formatFieldValue("preview", undefined, { enabled: false, profile: null }),
+    "Paused",
+  );
+  assert.equal(
+    schema.getFieldTone("preview", undefined, { enabled: false, profile: null }),
+    "muted",
+  );
+  assert.equal(schema.formatFieldValue("rules", undefined), "3 rules");
+  assert.equal(schema.getFieldTone("rules", undefined), "default");
+
+  // normalizeDraft exposed on schema
+  assert.equal(typeof schema.normalizeDraft, "function");
+  const normalized = schema.normalizeDraft(
+    { enabled: false, profile: { id: "fast", ver: 1 } },
+    "enabled",
+    { enabled: true, profile: { id: "fast", ver: 1 } },
+  );
+  assert.deepEqual(normalized, { enabled: false, profile: null });
+
+  // Schema-level scope check in isFieldAllowedInScope
+  const globalOnlySchema = defineSettings({
+    id: "global-only",
+    title: "Global Only",
+    scopes: ["global"],
+    fields: {
+      flag: field.boolean({ label: "Flag", default: true }),
+    },
+  });
+  assert.equal(globalOnlySchema.isFieldAllowedInScope("flag", "global"), true);
+  assert.equal(globalOnlySchema.isFieldAllowedInScope("flag", "project"), false);
 });

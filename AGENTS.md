@@ -18,7 +18,7 @@ adapter  ──▶  dialog  ──▶  store  ──▶  schema
 
 - **`src/schema/` (`./schema`)**: Pure TypeScript data model, `defineSettings()`, `field.*` builders, validators, `findSecretKeys`, `stripControlChars`, `deepEqual`, `cloneValue`, provenance & override-diff math. **MUST have zero Pi imports and zero Node built-in (`fs`/`path`/`os`) imports.**
 - **`src/store/` (`./store`)**: `SettingsStore`, hardened filesystem I/O (`fs-hardening.ts`), `createJsonFileStorageAdapter`, `createSessionStorageAdapter`, `createMemoryStorageAdapter`, error classes (`ConcurrencyConflictError`, `SettingsSecurityError`). **Imports ONLY Node built-ins (`node:*`) and `../schema/index.js` — zero Pi imports.**
-- **`src/dialog/` (`./dialog`)**: `SettingsDialogComponent`, `HitRegionTracker`, rounded box framing & height budgeting (`frame.ts`), and internal sub-routes (`routes/{confirm,text-input,select,multi-select,model-picker}-route.ts`). Imports `@earendil-works/pi-tui`, type-only `Theme` / `KeybindingsManager` from `@earendil-works/pi-coding-agent`, `../schema/index.js`, and `../store/index.js`.
+- **`src/dialog/` (`./dialog`)**: `SettingsDialogComponent`, `HitRegionTracker`, rounded box framing & height budgeting (`frame.ts`), and internal sub-routes (`routes/{confirm,text-input,select,multi-select,model-picker,text-viewer,dynamic-picker}-route.ts`). Imports `@earendil-works/pi-tui`, type-only `Theme` / `KeybindingsManager` from `@earendil-works/pi-coding-agent`, `../schema/index.js`, and `../store/index.js`.
 - **`src/adapter/` (`./adapter`)**: `openSettingsDialog()` (singleton overlay lifecycle, `AbortSignal`, mode dispatch) and `runRpcSettingsMenu()` (`ctx.mode === "rpc"` fallback).
 - **`src/index.ts` (`.`)**: Unified barrel re-export of all four layers.
 
@@ -40,7 +40,7 @@ pi-extension-settings-tui/
 │   ├── index.ts
 │   ├── schema/
 │   │   ├── types.ts                   # Schema, field defs, InferSettingsValues, schema.Type
-│   │   ├── fields.ts                  # field.{boolean,enum,multiSelect,string,number,integer,model,custom}
+│   │   ├── fields.ts                  # field.{boolean,enum,multiSelect,string,number,integer,model,picker,view,external,custom}
 │   │   ├── validate.ts                # Field validation, SECRET_KEY_PATTERN, stripControlChars, deepEqual
 │   │   ├── define.ts                  # defineSettings(), resolveEffective, computeProvenance, diffForScope
 │   │   └── index.ts
@@ -62,7 +62,9 @@ pi-extension-settings-tui/
 │   │   │   ├── text-input-route.ts    # Input (single-line) & Editor (multiline, Ctrl+S)
 │   │   │   ├── select-route.ts        # Input + fuzzyFilter searchable picker
 │   │   │   ├── multi-select-route.ts  # Searchable checklist + collapsible groups
-│   │   │   └── model-picker-route.ts  # 1- or 2-step Pi model (Scoped/All + fuzzy) -> optional thinking level picker
+│   │   │   ├── model-picker-route.ts  # 1- or 2-step Pi model (Scoped/All + fuzzy) -> optional thinking level picker
+│   │   │   ├── text-viewer-route.ts   # Scrollable read-only Markdown / plain text viewer with async load & refresh
+│   │   │   └── dynamic-picker-route.ts # Async searchable picker with groups, badges, disabledReason & validateSelection
 │   │   └── index.ts
 │   └── adapter/
 │       ├── types.ts                   # OpenSettingsDialogOptions/Result

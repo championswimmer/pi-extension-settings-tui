@@ -5,6 +5,7 @@ import type {
   FieldProvenance,
   InferSettingsValues,
   ModelPickerEntry,
+  PersistedFieldKeys,
   SaveMode,
   ScopedModelEntry,
   SettingsSchema,
@@ -52,6 +53,7 @@ export type DialogRouteComponent = Component &
 export interface DialogFrame {
   readonly title: string;
   readonly component: DialogRouteComponent;
+  readonly abortController?: AbortController;
 }
 
 /** Result returned to `done(result)` when the settings dialog closes. */
@@ -84,7 +86,7 @@ export interface SettingsDialogOptions<TFields extends FieldMap> {
     next: InferSettingsValues<TFields>,
     meta: {
       scope: SettingsScope;
-      provenance: Record<keyof TFields & string, FieldProvenance>;
+      provenance: Record<PersistedFieldKeys<TFields>, FieldProvenance>;
       writtenKeys: string[];
     },
   ) => void | Promise<void>;

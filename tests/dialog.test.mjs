@@ -12,9 +12,12 @@ import {
   createSettingsStore,
 } from "../dist/store/index.js";
 import {
+  DynamicPickerRoute,
   ModelPickerRoute,
+  renderMarkdownToAnsi,
   SelectRoute,
   SettingsDialogComponent,
+  TextViewerRoute,
 } from "../dist/dialog/index.js";
 
 const KEY_UP = "\x1b[A";
@@ -25,8 +28,13 @@ const KEY_TAB = "\t";
 const KEY_SHIFT_TAB = "\x1b[Z";
 const KEY_ENTER = "\r";
 const KEY_ESC = "\x1b";
+const KEY_CTRL_R = "\x12";
 const KEY_CTRL_S = "\x13";
 const KEY_CTRL_A = "\x01";
+const KEY_PGUP = "\x1b[5~";
+const KEY_PGDN = "\x1b[6~";
+const KEY_HOME = "\x1b[H";
+const KEY_END = "\x1b[F";
 
 function createMockTheme() {
   return {
@@ -1478,4 +1486,950 @@ test("17. ModelPickerRoute & SettingsDialogComponent with includeThinking: false
   assert.equal(results.length, 1);
   assert.equal(results[0].saved, true);
   assert.equal(results[0].values.summarizerModel, "openai/gpt-5-mini");
+});
+
+test("18. Dynamic label(values) updates live on root rows and sub-route titles", async () => {
+  const schema = defineSettings({
+    id: "dyn-label-test",
+    title: "Dynamic Label Test",
+    scopes: ["global"],
+    saveMode: "draft",
+    fields: {
+      enabled: field.boolean({
+        label: "Master Switch",
+        default: true,
+      }),
+      target: field.string({
+        label: (v) => (v.enabled ? "Active Endpoint" : "Standby Endpoint"),
+        description: "Endpoint label tracks Master Switch.",
+        default: "https://api.example.com",
+      }),
+    },
+  });
+
+  const adapter = createMemoryStorageAdapter();
+  const store = createSettingsStore(schema, { adapter });
+  const initialState = await store.load({ trustedProject: true });
+  const tui = createMockTui({ rows: 24, columns: 84, mode: "fullscreen" });
+  const dialog = new SettingsDialogComponent({
+    schema,
+    store,
+    initialState,
+    tui,
+    theme: createMockTheme(),
+    keybindings: createMockKeybindings(),
+    done: () => {},
+  });
+  dialog.focused = true;
+
+  let lines = dialog.render(84);
+  assert.ok(lines.some((l) => l.includes("Active Endpoint")));
+  assert.ok(!lines.some((l) => l.includes("Standby Endpoint")));
+
+  // Toggle Master Switch off -> root row label updates immediately
+  dialog.handleInput(" ");
+  lines = dialog.render(84);
+  assert.ok(lines.some((l) => l.includes("Standby Endpoint")));
+  assert.ok(!lines.some((l) => l.includes("Active Endpoint")));
+
+  // Open sub-route -> header title reflects the dynamic label
+  dialog.navigateTo({ field: "target" });
+  dialog.handleInput(KEY_ENTER);
+  lines = dialog.render(84);
+  assert.ok(lines[1].includes("Standby Endpoint"));
+});
+
+test("19. Row eligibility framework: eligible() and string disabled stay focusable, show help & warning banner without mutating", async () => {
+  const warnTheme = {
+    ...createMockTheme(),
+    fg: (color, text) => (color === "warning" ? `<warn>${text}</warn>` : text),
+  };
+
+  const schema = defineSettings({
+    id: "eligibility-test",
+    title: "Eligibility Test",
+    scopes: ["global"],
+    saveMode: "draft",
+    fields: {
+      enabled: field.boolean({
+        label: "Enabled",
+        default: false,
+      }),
+      hardLocked: field.boolean({
+        label: "Hard Locked",
+        default: false,
+        disabled: true,
+      }),
+      eligibleGated: field.boolean({
+        label: "Eligible Gated",
+        description: "Base description.",
+        default: false,
+        eligible: (v) =>
+          v.enabled
+            ? true
+            : { eligible: false, reason: "Turn on Enabled before toggling Eligible Gated." },
+      }),
+      stringDisabled: field.integer({
+        label: "String Disabled",
+        description: "Worker count.",
+        default: 4,
+        min: 1,
+        max: 10,
+        disabled: (v) => (v.enabled ? false : "String reason: feature is currently off."),
+      }),
+    },
+  });
+
+  const adapter = createMemoryStorageAdapter();
+  const store = createSettingsStore(schema, { adapter });
+  const initialState = await store.load({ trustedProject: true });
+  const tui = createMockTui({ rows: 26, columns: 86, mode: "fullscreen" });
+  const results = [];
+  const dialog = new SettingsDialogComponent({
+    schema,
+    store,
+    initialState,
+    tui,
+    theme: warnTheme,
+    keybindings: createMockKeybindings(),
+    done: (res) => results.push(res),
+  });
+  dialog.focused = true;
+
+  // Pressing Down from Enabled skips Hard Locked (boolean disabled: true) and lands on Eligible Gated
+  dialog.handleInput(KEY_DOWN);
+  let lines = dialog.render(86);
+  const gatedRow = lines.find((l) => stripTerminalSequences(l).includes("Eligible Gated"));
+  assert.ok(stripTerminalSequences(gatedRow ?? "").startsWith("│ ❯"));
+  assert.ok(lines.some((l) => stripTerminalSequences(l).includes("Turn on Enabled before toggling")));
+
+  // Enter, Space, and click show warning banner and do NOT mutate eligibleGated
+  for (const trigger of ["enter", "space", "click"]) {
+    if (trigger === "enter") dialog.handleInput(KEY_ENTER);
+    else if (trigger === "space") dialog.handleInput(" ");
+    else {
+      const pos = findTextPosition(lines, "Eligible Gated");
+      assert.ok(pos);
+      dialog.handleMouse(makeMouseEvent("press", pos));
+      dialog.handleMouse(makeMouseEvent("click", { ...pos, clickCount: 1 }));
+    }
+    lines = dialog.render(86);
+    assert.ok(
+      lines.some((l) => l.includes("<warn>Turn on Enabled before toggling Eligible Gated.</warn>")),
+      `Expected warning banner on ${trigger}`,
+    );
+    const updatedGated = lines.find((l) => stripTerminalSequences(l).includes("Eligible Gated"));
+    assert.ok(stripTerminalSequences(updatedGated ?? "").includes("Off"));
+  }
+
+  // Move down to String Disabled -> focusable, help shows string reason, Enter/arrow/click blocked with warning
+  dialog.handleInput(KEY_DOWN);
+  lines = dialog.render(86);
+  const strRow = lines.find((l) => stripTerminalSequences(l).includes("String Disabled"));
+  assert.ok(stripTerminalSequences(strRow ?? "").startsWith("│ ❯"));
+  assert.ok(lines.some((l) => stripTerminalSequences(l).includes("String reason: feature is currently off.")));
+
+  dialog.handleInput(KEY_RIGHT);
+  lines = dialog.render(86);
+  assert.ok(lines.some((l) => l.includes("<warn>String reason: feature is currently off.</warn>")));
+  assert.ok(stripTerminalSequences(lines.find((l) => stripTerminalSequences(l).includes("String Disabled")) ?? "").includes("4"));
+
+  dialog.handleInput(" ");
+  lines = dialog.render(86);
+  assert.ok(lines.some((l) => l.includes("<warn>String reason: feature is currently off.</warn>")));
+
+  // Enable master switch -> both rows become eligible and editable
+  dialog.navigateTo({ field: "enabled" });
+  dialog.handleInput(" ");
+  dialog.navigateTo({ field: "eligibleGated" });
+  dialog.handleInput(KEY_ENTER);
+  lines = dialog.render(86);
+  assert.ok(stripTerminalSequences(lines.find((l) => stripTerminalSequences(l).includes("Eligible Gated")) ?? "").includes("On"));
+
+  dialog.handleInput(KEY_CTRL_S);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(results[0].values.eligibleGated, true);
+  assert.equal(results[0].values.stringDisabled, 4);
+});
+
+test("20. Scope-aware rows render [Global only]/[Project only], stay focusable, and show scope-switch warning banner", async () => {
+  const warnTheme = {
+    ...createMockTheme(),
+    fg: (color, text) => (color === "warning" ? `<warn>${text}</warn>` : text),
+  };
+
+  const schema = defineSettings({
+    id: "scope-aware-test",
+    title: "Scope Aware Test",
+    scopes: ["global", "project"],
+    defaultScope: "global",
+    saveMode: "draft",
+    fields: {
+      globalOnly: field.boolean({
+        label: "Global Secret Policy",
+        description: "Applies globally.",
+        default: true,
+        scopes: ["global"],
+      }),
+      projectOnly: field.integer({
+        label: "Project Concurrency",
+        description: "Applies per project.",
+        default: 2,
+        min: 1,
+        max: 8,
+        scopes: ["project"],
+      }),
+    },
+  });
+
+  const adapter = createMemoryStorageAdapter();
+  const store = createSettingsStore(schema, { adapter });
+  const initialState = await store.load({ trustedProject: true });
+  const tui = createMockTui({ rows: 26, columns: 88, mode: "fullscreen" });
+  const dialog = new SettingsDialogComponent({
+    schema,
+    store,
+    initialState,
+    tui,
+    theme: warnTheme,
+    keybindings: createMockKeybindings(),
+    done: () => {},
+  });
+  dialog.focused = true;
+
+  // In Global scope: projectOnly renders [Project only], is focusable, and blocks Enter/Space/Left/Right/Click
+  let lines = dialog.render(88);
+  assert.ok(lines[1].includes("[Global]"));
+  assert.ok(lines.some((l) => stripTerminalSequences(l).includes("Project Concurrency [Project only]")));
+  assert.ok(!lines.some((l) => stripTerminalSequences(l).includes("[Global only]")));
+
+  dialog.handleInput(KEY_DOWN); // moves to Project Concurrency
+  lines = dialog.render(88);
+  assert.ok(
+    stripTerminalSequences(lines.find((l) => stripTerminalSequences(l).includes("Project Concurrency")) ?? "").startsWith("│ ❯"),
+  );
+
+  for (const input of [KEY_ENTER, " ", KEY_LEFT, KEY_RIGHT]) {
+    dialog.handleInput(input);
+    lines = dialog.render(88);
+    assert.ok(
+      lines.some((l) => l.includes("<warn>Project-only setting. Switch Save scope to Project to edit.</warn>")),
+    );
+    assert.ok(stripTerminalSequences(lines.find((l) => stripTerminalSequences(l).includes("Project Concurrency")) ?? "").includes("2"));
+  }
+
+  const projPos = findTextPosition(lines, "Project Concurrency");
+  assert.ok(projPos);
+  dialog.handleMouse(makeMouseEvent("press", projPos));
+  dialog.handleMouse(makeMouseEvent("click", { ...projPos, clickCount: 1 }));
+  lines = dialog.render(88);
+  assert.ok(
+    lines.some((l) => l.includes("<warn>Project-only setting. Switch Save scope to Project to edit.</warn>")),
+  );
+
+  // Switch Save scope to Project -> projectOnly becomes editable, globalOnly shows [Global only] and blocks edits
+  const scopePos = findTextPosition(lines, "Save scope");
+  assert.ok(scopePos);
+  dialog.handleMouse(makeMouseEvent("press", scopePos));
+  dialog.handleMouse(makeMouseEvent("click", { ...scopePos, clickCount: 1 }));
+  lines = dialog.render(88);
+  assert.ok(lines[1].includes("[Project]"));
+  assert.ok(lines.some((l) => stripTerminalSequences(l).includes("Global Secret Policy [Global only]")));
+  assert.ok(!lines.some((l) => stripTerminalSequences(l).includes("[Project only]")));
+
+  // Edit projectOnly via Right arrow -> succeeds (2 -> 3)
+  dialog.navigateTo({ field: "projectOnly" });
+  dialog.handleInput(KEY_RIGHT);
+  lines = dialog.render(88);
+  assert.ok(stripTerminalSequences(lines.find((l) => stripTerminalSequences(l).includes("Project Concurrency")) ?? "").includes("3"));
+
+  // Try editing globalOnly via Enter/Space/Left/Right/Click -> blocked with Global-only warning
+  dialog.navigateTo({ field: "globalOnly" });
+  for (const input of [KEY_ENTER, " ", KEY_LEFT, KEY_RIGHT]) {
+    dialog.handleInput(input);
+    lines = dialog.render(88);
+    assert.ok(
+      lines.some((l) => l.includes("<warn>Global-only setting. Switch Save scope to Global to edit.</warn>")),
+    );
+  }
+  const globalPos = findTextPosition(lines, "Global Secret Policy");
+  assert.ok(globalPos);
+  dialog.handleMouse(makeMouseEvent("press", globalPos));
+  dialog.handleMouse(makeMouseEvent("click", { ...globalPos, clickCount: 1 }));
+  lines = dialog.render(88);
+  assert.ok(
+    lines.some((l) => l.includes("<warn>Global-only setting. Switch Save scope to Global to edit.</warn>")),
+  );
+  assert.ok(stripTerminalSequences(lines.find((l) => stripTerminalSequences(l).includes("Global Secret Policy")) ?? "").includes("On"));
+});
+
+test("21. field.view (TextViewerRoute): Markdown rendering, bounds, scrolling, async load + Ctrl+R refresh, Esc, mouse, never persisted", async () => {
+  // Unit check renderMarkdownToAnsi directly for headings, bold, code, lists, and width safety
+  const mdLines = renderMarkdownToAnsi(
+    [
+      "# Main Heading",
+      "Paragraph with **bold text** and `inlineCode()`.",
+      "",
+      "- First item",
+      "  - Nested item",
+      "1. Ordered one",
+      "",
+      "```ts",
+      "const x = 42;",
+      "```",
+    ].join("\n"),
+    32,
+    createMockTheme(),
+  );
+  assert.ok(mdLines.some((l) => l.includes("Main Heading")));
+  assert.ok(mdLines.some((l) => l.includes("bold text")));
+  assert.ok(mdLines.some((l) => l.includes("inlineCode()")));
+  assert.ok(mdLines.some((l) => l.includes("• First item")));
+  assert.ok(mdLines.some((l) => l.includes("1. Ordered one")));
+  assert.ok(mdLines.some((l) => l.includes("const x = 42;")));
+  for (const line of mdLines) {
+    assert.ok(visibleWidth(line) <= 32, `Markdown line exceeded width 32: ${visibleWidth(line)}`);
+  }
+
+  // Async TextViewerRoute via field.view in SettingsDialogComponent
+  let loadCount = 0;
+  let abortedSignals = 0;
+  let resolveFirstLoad;
+  const schema = defineSettings({
+    id: "view-field-test",
+    title: "View Field Test",
+    scopes: ["global"],
+    saveMode: "draft",
+    fields: {
+      enabled: field.boolean({
+        label: "Enabled",
+        default: true,
+      }),
+      changelog: field.view({
+        label: "Diagnostics Report",
+        description: "Read-only markdown diagnostics.",
+        value: "Inspect…",
+        format: "markdown",
+        content: async (ctx) => {
+          loadCount++;
+          ctx.signal.addEventListener("abort", () => {
+            abortedSignals++;
+          });
+          if (loadCount === 1) {
+            await new Promise((resolve) => {
+              resolveFirstLoad = resolve;
+            });
+            return "# Should Be Aborted";
+          }
+          const bodyLines = Array.from({ length: 24 }, (_, idx) => `- Line ${idx + 1}: **item** \`code_${idx + 1}\``);
+          return `# Report v${loadCount} (${ctx.scope})\n\n${bodyLines.join("\n")}`;
+        },
+      }),
+    },
+  });
+
+  const adapter = createMemoryStorageAdapter();
+  const store = createSettingsStore(schema, { adapter });
+  const initialState = await store.load({ trustedProject: true });
+  const tui = createMockTui({ rows: 18, columns: 70, mode: "fullscreen" });
+  const results = [];
+  const dialog = new SettingsDialogComponent({
+    schema,
+    store,
+    initialState,
+    tui,
+    theme: createMockTheme(),
+    keybindings: createMockKeybindings(),
+    done: (res) => results.push(res),
+  });
+  dialog.focused = true;
+
+  // Root shows value summary "Inspect…"
+  let lines = dialog.render(70);
+  assert.ok(lines.some((l) => l.includes("Diagnostics Report") && l.includes("Inspect…")));
+
+  // Open viewer -> shows Loading… initially
+  dialog.navigateTo({ field: "changelog" });
+  dialog.handleInput(KEY_ENTER);
+  lines = dialog.render(70);
+  assert.ok(lines[1].includes("Diagnostics Report"));
+  assert.ok(lines.some((l) => l.includes("Loading…")));
+
+  // Press Ctrl+R while first load is still pending -> aborts first load and loads v2 immediately
+  dialog.handleInput(KEY_CTRL_R);
+  resolveFirstLoad?.();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(loadCount, 2);
+  assert.equal(abortedSignals, 1);
+
+  const maxLines = Math.max(8, 18 - 4);
+  lines = dialog.render(70);
+  assert.ok(lines.length <= maxLines);
+  for (const line of lines) {
+    assert.ok(visibleWidth(line) <= 70);
+  }
+  assert.ok(lines.some((l) => l.includes("Report v2 (global)")));
+  assert.ok(lines.some((l) => l.includes("Line 1: item code_1")));
+
+  // Scroll via End, Home, PgDn, and mouse wheel
+  dialog.handleInput(KEY_END);
+  lines = dialog.render(70);
+  assert.ok(lines.some((l) => l.includes("Line 24:")));
+  dialog.handleInput(KEY_HOME);
+  lines = dialog.render(70);
+  assert.ok(lines.some((l) => l.includes("Report v2 (global)")));
+  dialog.handleInput(KEY_PGDN);
+  lines = dialog.render(70);
+  assert.ok(!lines.some((l) => l.includes("Report v2 (global)")));
+  dialog.handleMouse(makeMouseEvent("wheel", { x: 10, y: 5, wheelDelta: -20 }));
+  lines = dialog.render(70);
+  assert.ok(lines.some((l) => l.includes("Report v2 (global)")));
+
+  // Click [Ctrl+R Refresh] pill -> loads v3
+  const refreshPos = findTextPosition(lines, "[Ctrl+R Refresh]");
+  assert.ok(refreshPos);
+  dialog.handleMouse(makeMouseEvent("press", refreshPos));
+  dialog.handleMouse(makeMouseEvent("click", { ...refreshPos, clickCount: 1 }));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(loadCount, 3);
+  lines = dialog.render(70);
+  assert.ok(lines.some((l) => l.includes("Report v3 (global)")));
+
+  // Click [Esc Back] (and also test Esc key) returns to root
+  const backPos = findTextPosition(lines, "[Esc Back]");
+  assert.ok(backPos);
+  dialog.handleMouse(makeMouseEvent("press", backPos));
+  dialog.handleMouse(makeMouseEvent("click", { ...backPos, clickCount: 1 }));
+  lines = dialog.render(70);
+  assert.ok(!lines[1].includes("Diagnostics Report"));
+
+  // Re-open and close with Esc key
+  dialog.handleInput(KEY_ENTER);
+  await new Promise((r) => setTimeout(r, 20));
+  dialog.handleInput(KEY_ESC);
+  lines = dialog.render(70);
+  assert.ok(!lines[1].includes("Diagnostics Report"));
+
+  // Toggle enabled and save -> verify changelog is NEVER written to storage
+  dialog.navigateTo({ field: "enabled" });
+  dialog.handleInput(" ");
+  dialog.handleInput(KEY_CTRL_S);
+  await new Promise((r) => setTimeout(r, 20));
+  const savedLayer = await adapter.readLayer("global");
+  assert.deepEqual(savedLayer.data, { enabled: false });
+  assert.equal("changelog" in results[0].values, false);
+  // Sanity check TextViewerRoute export can be constructed directly
+  assert.equal(typeof TextViewerRoute, "function");
+});
+
+test("22. field.external: async summary, sync & async openSubroute (LoadingRoute + Esc abort), close() refresh, never persisted", async () => {
+  const toneTheme = {
+    ...createMockTheme(),
+    fg: (color, text) => (color === "success" ? `<success>${text}</success>` : text),
+  };
+
+  let summaryCalls = 0;
+  let syncParams = null;
+  let asyncSignalAborted = false;
+  let resolveAsyncSubroute;
+
+  const schema = defineSettings({
+    id: "external-field-test",
+    title: "External Field Test",
+    scopes: ["global"],
+    saveMode: "draft",
+    fields: {
+      enabled: field.boolean({
+        label: "Enabled",
+        default: true,
+      }),
+      syncTool: field.external({
+        label: "Sync Profiles",
+        description: "Manage external profiles.",
+        summary: async () => {
+          summaryCalls++;
+          await new Promise((r) => setTimeout(r, 5));
+          return { text: `${summaryCalls} synced`, tone: "success" };
+        },
+        openSubroute: (params) => {
+          syncParams = params;
+          return {
+            title: "Profile Manager",
+            focused: false,
+            render: () => [`Scope=${params.scope} MaxH=${params.getMaxHeight()}`],
+            handleInput: (data) => {
+              if (data === KEY_ENTER) {
+                params.close({
+                  saved: true,
+                  message: "Profiles updated externally.",
+                  tone: "success",
+                });
+              }
+            },
+            invalidate: () => {},
+          };
+        },
+      }),
+      asyncTool: field.external({
+        label: "Async Connect",
+        description: "Connect asynchronously.",
+        summary: "Ready",
+        openSubroute: async (params) => {
+          params.signal.addEventListener("abort", () => {
+            asyncSignalAborted = true;
+          });
+          await new Promise((resolve) => {
+            resolveAsyncSubroute = resolve;
+          });
+          return {
+            title: "Connected",
+            focused: false,
+            render: () => ["Connected"],
+            invalidate: () => {},
+          };
+        },
+      }),
+    },
+  });
+
+  const adapter = createMemoryStorageAdapter();
+  const store = createSettingsStore(schema, { adapter });
+  const initialState = await store.load({ trustedProject: true });
+  const tui = createMockTui({ rows: 24, columns: 84, mode: "fullscreen" });
+  const results = [];
+  const dialog = new SettingsDialogComponent({
+    schema,
+    store,
+    initialState,
+    tui,
+    theme: toneTheme,
+    keybindings: createMockKeybindings(),
+    done: (res) => results.push(res),
+  });
+  dialog.focused = true;
+
+  // Initial render shows "…" placeholder while async summary resolves
+  let lines = dialog.render(84);
+  assert.ok(lines.some((l) => l.includes("Sync Profiles") && l.includes("…")));
+
+  await new Promise((r) => setTimeout(r, 20));
+  lines = dialog.render(84);
+  assert.ok(lines.some((l) => l.includes("Sync Profiles") && l.includes("<success>1 synced</success>")));
+
+  // Open syncTool -> verify params & close({ saved: true, message }) refreshes summary and sets banner
+  dialog.navigateTo({ field: "syncTool" });
+  dialog.handleInput(KEY_ENTER);
+  assert.ok(syncParams);
+  assert.equal(syncParams.scope, "global");
+  assert.equal(typeof syncParams.getMaxHeight, "function");
+  assert.ok(syncParams.getMaxHeight() > 0);
+  assert.equal(syncParams.signal instanceof AbortSignal, true);
+  assert.equal(typeof syncParams.close, "function");
+
+  lines = dialog.render(84);
+  assert.ok(lines[1].includes("Profile Manager"));
+  assert.ok(lines.some((l) => l.includes("Scope=global")));
+
+  dialog.handleInput(KEY_ENTER); // triggers params.close(...)
+  lines = dialog.render(84);
+  assert.ok(lines.some((l) => l.includes("Profiles updated externally.")));
+  await new Promise((r) => setTimeout(r, 20));
+  lines = dialog.render(84);
+  assert.ok(lines.some((l) => l.includes("<success>2 synced</success>")));
+
+  // Open asyncTool -> LoadingRoute appears; Esc cancels & aborts signal
+  dialog.navigateTo({ field: "asyncTool" });
+  dialog.handleInput(KEY_ENTER);
+  lines = dialog.render(84);
+  assert.ok(lines[1].includes("Async Connect"));
+  assert.ok(lines.some((l) => l.includes("Loading…")));
+
+  dialog.handleInput(KEY_ESC);
+  assert.equal(asyncSignalAborted, true);
+  resolveAsyncSubroute?.();
+  await new Promise((r) => setTimeout(r, 10));
+  lines = dialog.render(84);
+  assert.ok(!lines[1].includes("Async Connect"));
+
+  // Save another field -> external fields are never written to storage
+  dialog.navigateTo({ field: "enabled" });
+  dialog.handleInput(" ");
+  dialog.handleInput(KEY_CTRL_S);
+  await new Promise((r) => setTimeout(r, 20));
+  const savedLayer = await adapter.readLayer("global");
+  assert.deepEqual(savedLayer.data, { enabled: false });
+  assert.equal("syncTool" in results[0].values, false);
+  assert.equal("asyncTool" in results[0].values, false);
+});
+
+test("23. field.picker (DynamicPickerRoute): async load, fuzzy search, groups, badges, disabledReason, validateSelection, allowClear, Ctrl+R, mouse & persistence", async () => {
+  let loadCalls = 0;
+  const schema = defineSettings({
+    id: "picker-field-test",
+    title: "Picker Field Test",
+    scopes: ["global"],
+    saveMode: "draft",
+    fields: {
+      profile: field.picker({
+        label: "Target Profile",
+        description: "Choose a deployment profile.",
+        default: null,
+        allowClear: true,
+        emptyLabel: "No Profile",
+        emptyDescription: "Use built-in defaults",
+        loadOptions: async () => {
+          loadCalls++;
+          await new Promise((r) => setTimeout(r, 5));
+          return [
+            {
+              id: "dev",
+              value: "dev",
+              label: "Development",
+              group: "Local",
+              badge: "fast",
+              badgeTone: "accent",
+              description: "Local dev sandbox",
+            },
+            {
+              id: "staging",
+              value: "staging",
+              label: "Staging",
+              group: "Cloud",
+              badge: "beta",
+              description: "Pre-prod cluster",
+            },
+            {
+              id: "prod-locked",
+              value: "prod-locked",
+              label: "Production Locked",
+              group: "Cloud",
+              disabled: true,
+              disabledReason: "Requires elevated prod token.",
+            },
+            {
+              id: "prod",
+              value: "prod",
+              label: "Production",
+              group: "Cloud",
+              badge: `v${loadCalls}`,
+            },
+          ];
+        },
+        validateSelection: async (opt) => {
+          await new Promise((r) => setTimeout(r, 5));
+          if (opt.value === "staging") {
+            return "Staging cluster is currently under maintenance.";
+          }
+          return true;
+        },
+      }),
+    },
+  });
+
+  const adapter = createMemoryStorageAdapter();
+  const store = createSettingsStore(schema, { adapter });
+  const initialState = await store.load({ trustedProject: true });
+  const tui = createMockTui({ rows: 24, columns: 86, mode: "fullscreen" });
+  const results = [];
+  const dialog = new SettingsDialogComponent({
+    schema,
+    store,
+    initialState,
+    tui,
+    theme: createMockTheme(),
+    keybindings: createMockKeybindings(),
+    done: (res) => results.push(res),
+  });
+  dialog.focused = true;
+
+  // Open picker -> Loading options… -> resolves with groups, badges, clear row
+  dialog.handleInput(KEY_ENTER);
+  let lines = dialog.render(86);
+  assert.ok(lines.some((l) => l.includes("Loading options…")));
+
+  await new Promise((r) => setTimeout(r, 20));
+  lines = dialog.render(86);
+  assert.ok(lines.some((l) => l.includes("No Profile")));
+  assert.ok(lines.some((l) => l.includes("Local")));
+  assert.ok(lines.some((l) => l.includes("Development")) && lines.some((l) => l.includes("fast")));
+  assert.ok(lines.some((l) => l.includes("Cloud")));
+
+  // Mouse wheel inside DynamicPickerRoute
+  const wheelRes = dialog.handleMouse(makeMouseEvent("wheel", { x: 10, y: 6, wheelDelta: 1 }));
+  assert.deepEqual(wheelRes, { handled: true, render: true });
+
+  // Ctrl+R refresh reloads options (v1 -> v2)
+  dialog.handleInput(KEY_CTRL_R);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(loadCalls, 2);
+  lines = dialog.render(86);
+  assert.ok(lines.some((l) => l.includes("v2")));
+
+  // Fuzzy filter "prod" -> shows Production Locked & Production; clicking disabled option shows inline banner
+  for (const ch of "prod") dialog.handleInput(ch);
+  lines = dialog.render(86);
+  assert.ok(lines.some((l) => l.includes("Production Locked")));
+  assert.ok(!lines.some((l) => l.includes("Development")));
+
+  const lockedPos = findTextPosition(lines, "Production Locked");
+  assert.ok(lockedPos);
+  dialog.handleMouse(makeMouseEvent("press", lockedPos));
+  dialog.handleMouse(makeMouseEvent("click", { ...lockedPos, clickCount: 1 }));
+  lines = dialog.render(86);
+  assert.ok(lines.some((l) => l.includes("⚠ Requires elevated prod token.")));
+
+  // Clear filter with Ctrl+U, select Staging -> async validateSelection fails with inline error banner
+  dialog.handleInput("\x15");
+  for (const ch of "staging") dialog.handleInput(ch);
+  dialog.handleInput(KEY_ENTER);
+  lines = dialog.render(86);
+  assert.ok(lines.some((l) => l.includes("Validating selection…")));
+  await new Promise((r) => setTimeout(r, 20));
+  lines = dialog.render(86);
+  assert.ok(lines.some((l) => l.includes("⚠ Staging cluster is currently under maintenance.")));
+
+  // Filter "Development" and click it -> passes validateSelection and commits "dev"
+  dialog.handleInput("\x15");
+  for (const ch of "dev") dialog.handleInput(ch);
+  lines = dialog.render(86);
+  const devPos = findTextPosition(lines, "Development");
+  assert.ok(devPos);
+  dialog.handleMouse(makeMouseEvent("press", devPos));
+  dialog.handleMouse(makeMouseEvent("click", { ...devPos, clickCount: 1 }));
+  await new Promise((r) => setTimeout(r, 20));
+  lines = dialog.render(86);
+  assert.ok(!lines[1].includes("Target Profile"));
+  assert.ok(lines.some((l) => l.includes("dev")));
+
+  // Re-open picker and clear back to null via clear row
+  dialog.handleInput(KEY_ENTER);
+  await new Promise((r) => setTimeout(r, 20));
+  lines = dialog.render(86);
+  const clearPos = findTextPosition(lines, "No Profile");
+  assert.ok(clearPos);
+  dialog.handleMouse(makeMouseEvent("press", clearPos));
+  dialog.handleMouse(makeMouseEvent("click", { ...clearPos, clickCount: 1 }));
+  lines = dialog.render(86);
+  assert.ok(lines.some((l) => l.includes("No Profile")));
+
+  // Re-open picker, pick Production, and Ctrl+S save -> persists "prod"
+  dialog.handleInput(KEY_ENTER);
+  await new Promise((r) => setTimeout(r, 20));
+  for (const ch of "production") dialog.handleInput(ch);
+  lines = dialog.render(86);
+  const prodPos = findTextPosition(lines, `v${loadCalls}`);
+  assert.ok(prodPos);
+  dialog.handleMouse(makeMouseEvent("press", prodPos));
+  dialog.handleMouse(makeMouseEvent("click", { ...prodPos, clickCount: 1 }));
+  await new Promise((r) => setTimeout(r, 20));
+
+  dialog.handleInput(KEY_CTRL_S);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(results[0].saved, true);
+  assert.equal(results[0].values.profile, "prod");
+  const savedLayer = await adapter.readLayer("global");
+  assert.equal(savedLayer.data?.profile, "prod");
+  assert.equal(typeof DynamicPickerRoute, "function");
+});
+
+test("24. Upgraded field.custom receives scope, signal (aborted on pop), getMaxHeight, requestRender, commitFields, and notify", async () => {
+  let receivedParams = null;
+  let abortedCount = 0;
+
+  const schema = defineSettings({
+    id: "upgraded-custom-test",
+    title: "Upgraded Custom Test",
+    scopes: ["global", "project"],
+    defaultScope: "project",
+    saveMode: "draft",
+    fields: {
+      enabled: field.boolean({
+        label: "Enabled",
+        default: true,
+      }),
+      workers: field.integer({
+        label: "Workers",
+        default: 2,
+        min: 1,
+        max: 32,
+      }),
+      bundle: field.custom({
+        label: "Preset Bundle",
+        default: "standard",
+        openSubroute: (params) => {
+          receivedParams = params;
+          params.signal.addEventListener("abort", () => {
+            abortedCount++;
+          });
+          return {
+            title: "Bundle Editor",
+            focused: false,
+            render: () => [`scope=${params.scope} maxH=${params.getMaxHeight()}`],
+            handleInput: (data) => {
+              if (data === "n") {
+                params.notify("Custom helper notice", "warn");
+              } else if (data === KEY_ENTER) {
+                params.commitFields({
+                  bundle: "turbo",
+                  enabled: false,
+                  workers: 16,
+                });
+              } else if (data === KEY_ESC) {
+                params.cancel();
+              }
+            },
+            invalidate: () => {},
+          };
+        },
+      }),
+    },
+  });
+
+  const adapter = createMemoryStorageAdapter();
+  const store = createSettingsStore(schema, { adapter });
+  const initialState = await store.load({ trustedProject: true });
+  const tui = createMockTui({ rows: 24, columns: 84, mode: "fullscreen" });
+  const results = [];
+  const dialog = new SettingsDialogComponent({
+    schema,
+    store,
+    initialState,
+    tui,
+    theme: createMockTheme(),
+    keybindings: createMockKeybindings(),
+    done: (res) => results.push(res),
+  });
+  dialog.focused = true;
+
+  // Open bundle subroute -> verify params and Esc aborts signal
+  dialog.navigateTo({ field: "bundle" });
+  dialog.handleInput(KEY_ENTER);
+  assert.ok(receivedParams);
+  assert.equal(receivedParams.scope, "project");
+  assert.equal(receivedParams.signal.aborted, false);
+  assert.ok(receivedParams.getMaxHeight() > 0);
+
+  const rendersBefore = tui.renderRequests;
+  receivedParams.requestRender();
+  assert.equal(tui.renderRequests, rendersBefore + 1);
+
+  dialog.handleInput(KEY_ESC);
+  assert.equal(abortedCount, 1);
+  assert.equal(receivedParams.signal.aborted, true);
+
+  // Re-open -> trigger notify, then commitFields atomically updates 3 fields and pops route
+  dialog.handleInput(KEY_ENTER);
+  dialog.handleInput("n");
+  dialog.handleInput(KEY_ENTER);
+  assert.equal(abortedCount, 2);
+
+  let lines = dialog.render(84);
+  assert.ok(!lines[1].includes("Bundle Editor"));
+  assert.ok(lines[1].includes("● Unsaved (3)"));
+
+  dialog.handleInput(KEY_CTRL_S);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(results[0].saved, true);
+  assert.equal(results[0].values.bundle, "turbo");
+  assert.equal(results[0].values.enabled, false);
+  assert.equal(results[0].values.workers, 16);
+  const savedLayer = await adapter.readLayer("project");
+  assert.deepEqual(savedLayer.data, { bundle: "turbo", enabled: false, workers: 16 });
+});
+
+test("25. Arrow stepping (picker enum ignores Left/Right; exact float stepping 0.375 + 0.05 = 0.425) and normalizeDraft", async () => {
+  const schema = defineSettings({
+    id: "stepping-normalize-test",
+    title: "Stepping & Normalize",
+    scopes: ["global"],
+    saveMode: "draft",
+    normalizeDraft: (draft, changedKey) => {
+      if (changedKey === "mode" && draft.mode === "strict") {
+        return { ...draft, enabled: true, ratio: 0.425 };
+      }
+      if (changedKey === "enabled" && !draft.enabled) {
+        return { ...draft, mode: "off" };
+      }
+      return draft;
+    },
+    fields: {
+      enabled: field.boolean({
+        label: "Enabled",
+        default: false,
+      }),
+      mode: field.enum({
+        label: "Mode",
+        display: "picker",
+        default: "off",
+        options: [
+          { value: "off", label: "Off" },
+          { value: "auto", label: "Auto" },
+          { value: "strict", label: "Strict" },
+        ],
+      }),
+      ratio: field.number({
+        label: "Ratio",
+        default: 0.375,
+        min: 0,
+        max: 1,
+        step: 0.05,
+      }),
+    },
+  });
+
+  const adapter = createMemoryStorageAdapter();
+  const store = createSettingsStore(schema, { adapter });
+  const initialState = await store.load({ trustedProject: true });
+  const tui = createMockTui({ rows: 24, columns: 84, mode: "fullscreen" });
+  const results = [];
+  const dialog = new SettingsDialogComponent({
+    schema,
+    store,
+    initialState,
+    tui,
+    theme: createMockTheme(),
+    keybindings: createMockKeybindings(),
+    done: (res) => results.push(res),
+  });
+  dialog.focused = true;
+
+  // display: "picker" enum ignores Left/Right inline stepping
+  dialog.navigateTo({ field: "mode" });
+  dialog.handleInput(KEY_RIGHT);
+  dialog.handleInput(KEY_LEFT);
+  let lines = dialog.render(84);
+  assert.ok(stripTerminalSequences(lines.find((l) => stripTerminalSequences(l).includes("Mode")) ?? "").includes("Off"));
+
+  // field.number starting at 0.375 with step 0.05 steps cleanly to 0.425 (no 0.42500000000000004)
+  dialog.navigateTo({ field: "ratio" });
+  dialog.handleInput(KEY_RIGHT);
+  lines = dialog.render(84);
+  const ratioLine = stripTerminalSequences(lines.find((l) => stripTerminalSequences(l).includes("Ratio")) ?? "");
+  assert.match(ratioLine, /\s0\.425 │$/, `Expected exact 0.425, got: ${ratioLine}`);
+
+  dialog.handleInput(KEY_LEFT);
+  lines = dialog.render(84);
+  const backRatioLine = stripTerminalSequences(lines.find((l) => stripTerminalSequences(l).includes("Ratio")) ?? "");
+  assert.match(backRatioLine, /\s0\.375 │$/, `Expected exact 0.375, got: ${backRatioLine}`);
+
+  // Open picker for Mode and pick "Strict" -> normalizeDraft atomically sets enabled=true and ratio=0.425
+  dialog.navigateTo({ field: "mode" });
+  dialog.handleInput(KEY_ENTER);
+  dialog.handleInput(KEY_DOWN);
+  dialog.handleInput(KEY_DOWN);
+  dialog.handleInput(KEY_ENTER);
+
+  lines = dialog.render(84);
+  assert.ok(lines[1].includes("● Unsaved (3)"));
+  assert.ok(stripTerminalSequences(lines.find((l) => stripTerminalSequences(l).includes("Enabled")) ?? "").includes("On"));
+  assert.ok(stripTerminalSequences(lines.find((l) => stripTerminalSequences(l).includes("Ratio")) ?? "").includes("0.425"));
+
+  dialog.handleInput(KEY_CTRL_S);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(results[0].saved, true);
+  assert.deepEqual(results[0].values, {
+    enabled: true,
+    mode: "strict",
+    ratio: 0.425,
+  });
 });

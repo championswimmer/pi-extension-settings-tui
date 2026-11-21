@@ -885,4 +885,93 @@ describe("store / session and memory adapters", () => {
     assert.equal(restored.deletedFile, true);
     assert.equal(restored.loaded.effective.enabled, true);
   });
+
+  it("reports per-scope rejectedKeys and skips non-persisted view/external fields", async () => {
+    const schema = defineSettings({
+      id: "non-persisted-store",
+      title: "Non-Persisted Store",
+      scopes: ["global", "project"],
+      fields: {
+        enabled: field.boolean({ label: "Enabled", default: true }),
+        profile: field.picker({
+          label: "Profile",
+          default: null,
+          allowClear: true,
+          loadOptions: () => [{ id: "std", value: "std", label: "Standard" }],
+          validate: (raw) => raw === null || typeof raw === "string" || "Invalid profile",
+        }),
+        inspect: field.view({
+          label: "Inspect",
+          content: "Markdown details",
+        }),
+        externalRules: field.external({
+          label: "Rules",
+          openSubroute: () => null,
+        }),
+      },
+    });
+
+    const adapter = createMemoryStorageAdapter({
+      global: {
+        enabled: false,
+        profile: 42, // invalid
+        inspect: "should-not-load", // non-persisted
+        unknownGlobal: true,
+      },
+      project: {
+        profile: "std",
+        externalRules: { hack: true }, // non-persisted
+      },
+    });
+
+    const store = createSettingsStore(schema, { adapter });
+
+    // Untrusted load only checks global rejectedKeys
+    const untrusted = await store.load({ trustedProject: false });
+    assert.deepEqual(untrusted.effective, { enabled: false, profile: null });
+    assert.deepEqual([...untrusted.rejectedKeys.global].sort(), [
+      "inspect",
+      "profile",
+      "unknownGlobal",
+    ]);
+    assert.deepEqual(untrusted.rejectedKeys.project, []);
+
+    // Trusted load checks both global and project rejectedKeys
+    const trusted = await store.load({ trustedProject: true });
+    assert.deepEqual(trusted.effective, { enabled: false, profile: "std" });
+    assert.deepEqual(trusted.provenance, { enabled: "global", profile: "project" });
+    assert.deepEqual([...trusted.rejectedKeys.global].sort(), [
+      "inspect",
+      "profile",
+      "unknownGlobal",
+    ]);
+    assert.deepEqual(trusted.rejectedKeys.project, ["externalRules"]);
+
+    // Saving persisted fields succeeds and ignores any non-persisted keys
+    const saved = await store.save(
+      { enabled: true, profile: "custom" },
+      { scope: "global", trustedProject: true, expectedSnapshot: trusted.snapshot },
+    );
+    assert.deepEqual(saved.writtenKeys, ["profile"]);
+    assert.deepEqual(saved.loaded.rejectedKeys.global, []);
+    assert.equal(saved.loaded.effective.profile, "std"); // project still overrides global
+
+    // Patching non-persisted view or external field throws
+    await assert.rejects(
+      () =>
+        store.patch(
+          { inspect: "x" },
+          { scope: "global", trustedProject: true, expectedSnapshot: saved.loaded.snapshot },
+        ),
+      /not persisted/i,
+    );
+    await assert.rejects(
+      () =>
+        store.patch(
+          { externalRules: "x" },
+          { scope: "global", trustedProject: true, expectedSnapshot: saved.loaded.snapshot },
+        ),
+      /not persisted/i,
+    );
+  });
 });

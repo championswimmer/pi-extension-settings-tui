@@ -77,6 +77,7 @@ export interface LoadedSettings<TValues extends Record<string, unknown>> {
   readonly layers: SettingsLayersData<TValues>;
   readonly provenance: Record<keyof TValues & string, FieldProvenance>;
   readonly warnings: string[];
+  readonly rejectedKeys: Readonly<Record<SettingsScope, readonly string[]>>;
   readonly trustedProject: boolean;
   readonly paths: Partial<Record<SettingsScope, string>>;
   readonly snapshot: LayersSnapshot;

@@ -1,9 +1,13 @@
 import type {
   AnyFieldDef,
+  FieldEligibility,
   FieldMap,
   FieldProvenance,
   InferSettingsValues,
   PartialValidationResult,
+  PersistedFieldDef,
+  PersistedFieldKeys,
+  ResolvedFieldEligibility,
   SaveMode,
   SettingsLayersData,
   SettingsSchema,
@@ -14,7 +18,13 @@ import type {
   ValidationResult,
   ValueTone,
 } from "./types.js";
-import { cloneValue, deepEqual, validateFieldValue, validatePartialSettings } from "./validate.js";
+import {
+  cloneValue,
+  deepEqual,
+  isPersistedFieldDef,
+  validateFieldValue,
+  validatePartialSettings,
+} from "./validate.js";
 
 const DEFAULT_TAB: TabDefinition = { id: "general", label: "General" };
 const DEFAULT_SCOPES: readonly SettingsScope[] = ["global", "project"];
@@ -27,7 +37,7 @@ function truncateDisplay(text: string, maxLen = MAX_FORMAT_STRING_LEN): string {
   return `${text.slice(0, Math.max(0, maxLen - 3))}...`;
 }
 
-function formatDefaultFieldValue(def: AnyFieldDef, value: unknown): string {
+function formatDefaultFieldValue(def: PersistedFieldDef, value: unknown): string {
   switch (def.kind) {
     case "boolean": {
       return value ? (def.trueLabel ?? "On") : (def.falseLabel ?? "Off");
@@ -91,6 +101,32 @@ function formatDefaultFieldValue(def: AnyFieldDef, value: unknown): string {
       return String(value);
     }
 
+    case "picker": {
+      const isEqual = def.equals ?? deepEqual;
+      const clearVal = def.clearValue !== undefined ? def.clearValue : null;
+      if (
+        value === null ||
+        value === undefined ||
+        (def.allowClear && isEqual(value, clearVal))
+      ) {
+        return def.emptyLabel ?? "None";
+      }
+      if (typeof value === "string") {
+        return value.length === 0 ? (def.emptyLabel ?? "None") : truncateDisplay(value);
+      }
+      if (Array.isArray(value)) {
+        return value.length === 0 ? (def.emptyLabel ?? "None") : `${value.length} items`;
+      }
+      if (typeof value === "object") {
+        try {
+          return truncateDisplay(JSON.stringify(value));
+        } catch {
+          return "[object]";
+        }
+      }
+      return String(value);
+    }
+
     case "custom": {
       if (value === null || value === undefined) {
         return "(empty)";
@@ -113,7 +149,7 @@ function formatDefaultFieldValue(def: AnyFieldDef, value: unknown): string {
   }
 }
 
-function getDefaultFieldTone(def: AnyFieldDef, value: unknown): ValueTone {
+function getDefaultFieldTone(def: PersistedFieldDef, value: unknown): ValueTone {
   switch (def.kind) {
     case "boolean":
       return value ? "success" : "muted";
@@ -131,6 +167,20 @@ function getDefaultFieldTone(def: AnyFieldDef, value: unknown): ValueTone {
 
     case "model":
       return value === null || value === undefined ? "muted" : "accent";
+
+    case "picker": {
+      const isEqual = def.equals ?? deepEqual;
+      const clearVal = def.clearValue !== undefined ? def.clearValue : null;
+      if (
+        value === null ||
+        value === undefined ||
+        value === "" ||
+        (def.allowClear && isEqual(value, clearVal))
+      ) {
+        return "muted";
+      }
+      return "accent";
+    }
 
     case "number":
     case "custom":
@@ -168,6 +218,7 @@ export function defineSettings<TFields extends FieldMap>(
       ? { ...(config.storage ?? {}), settingsFile }
       : (config.storage ?? {});
   const fieldKeys = Object.keys(config.fields) as (keyof TFields & string)[];
+  const persistedFieldKeys: PersistedFieldKeys<TFields>[] = [];
 
   const fieldTabMap = new Map<string, string>();
   const defaultTabId = tabs[0]!.id;
@@ -182,10 +233,27 @@ export function defineSettings<TFields extends FieldMap>(
       );
     }
     fieldTabMap.set(key, resolvedTab);
-    defaultsRecord[key] = cloneValue(def.default);
+    if (isPersistedFieldDef(def)) {
+      persistedFieldKeys.push(key as PersistedFieldKeys<TFields>);
+      defaultsRecord[key] = cloneValue(def.default);
+    }
   }
 
   const defaults = defaultsRecord as InferSettingsValues<TFields>;
+
+  const isFieldAllowedInScope = <K extends keyof TFields & string>(
+    key: K,
+    scope: SettingsScope,
+  ): boolean => {
+    if (!scopes.includes(scope)) {
+      return false;
+    }
+    if (!Object.prototype.hasOwnProperty.call(config.fields, key)) {
+      return false;
+    }
+    const def = config.fields[key]!;
+    return def.scopes ? def.scopes.includes(scope) : true;
+  };
 
   return {
     config,
@@ -202,9 +270,11 @@ export function defineSettings<TFields extends FieldMap>(
     storage,
     fields: config.fields,
     fieldKeys,
+    persistedFieldKeys,
     defaults,
     // Phantom type carrier for `typeof schema.Type`
     Type: defaults,
+    ...(config.normalizeDraft ? { normalizeDraft: config.normalizeDraft } : {}),
 
     getDefaults(): InferSettingsValues<TFields> {
       return cloneValue(defaults);
@@ -220,14 +290,23 @@ export function defineSettings<TFields extends FieldMap>(
       return list;
     },
 
-    validateField<K extends keyof TFields & string>(
+    isFieldAllowedInScope,
+
+    validateField<K extends PersistedFieldKeys<TFields>>(
       key: K,
       raw: unknown,
     ): ValidationResult<InferSettingsValues<TFields>[K]> {
       if (!Object.prototype.hasOwnProperty.call(config.fields, key)) {
         return { ok: false, error: `Unknown field "${key}"` };
       }
-      return validateFieldValue(config.fields[key]!, raw) as ValidationResult<
+      const def = config.fields[key]!;
+      if (!isPersistedFieldDef(def)) {
+        return {
+          ok: false,
+          error: `Field "${key}" (kind "${def.kind}") is not persisted and cannot be validated`,
+        };
+      }
+      return validateFieldValue(def, raw) as ValidationResult<
         InferSettingsValues<TFields>[K]
       >;
     },
@@ -243,7 +322,7 @@ export function defineSettings<TFields extends FieldMap>(
       const includeProject = options?.includeProject ?? true;
       const result: Record<string, unknown> = {};
 
-      for (const key of fieldKeys) {
+      for (const key of persistedFieldKeys) {
         let value = defaults[key];
         if (
           Object.prototype.hasOwnProperty.call(layers.global, key) &&
@@ -267,11 +346,11 @@ export function defineSettings<TFields extends FieldMap>(
     computeProvenance(
       layers: SettingsLayersData<InferSettingsValues<TFields>>,
       options?: { includeProject?: boolean },
-    ): Record<keyof TFields & string, FieldProvenance> {
+    ): Record<PersistedFieldKeys<TFields>, FieldProvenance> {
       const includeProject = options?.includeProject ?? true;
       const result: Record<string, FieldProvenance> = {};
 
-      for (const key of fieldKeys) {
+      for (const key of persistedFieldKeys) {
         const inGlobal =
           Object.prototype.hasOwnProperty.call(layers.global, key) &&
           layers.global[key] !== undefined;
@@ -291,7 +370,7 @@ export function defineSettings<TFields extends FieldMap>(
         }
       }
 
-      return result as Record<keyof TFields & string, FieldProvenance>;
+      return result as Record<PersistedFieldKeys<TFields>, FieldProvenance>;
     },
 
     diffForScope(
@@ -301,15 +380,16 @@ export function defineSettings<TFields extends FieldMap>(
     ): Partial<InferSettingsValues<TFields>> {
       const diff: Record<string, unknown> = {};
 
-      for (const key of fieldKeys) {
-        const def = config.fields[key]!;
-        if (def.scopes && !def.scopes.includes(scope)) {
+      for (const key of persistedFieldKeys) {
+        if (!isFieldAllowedInScope(key, scope)) {
           continue;
         }
+        const def = config.fields[key]!;
+        const isEqual = def.kind === "picker" && def.equals ? def.equals : deepEqual;
 
         const nextVal = nextValues[key];
         if (scope === "global") {
-          if (!deepEqual(nextVal, defaults[key])) {
+          if (!isEqual(nextVal, defaults[key])) {
             diff[key] = cloneValue(nextVal);
           }
         } else {
@@ -317,13 +397,27 @@ export function defineSettings<TFields extends FieldMap>(
             Object.prototype.hasOwnProperty.call(existingLayers.global, key) &&
             existingLayers.global[key] !== undefined;
           const baseVal = hasGlobal ? existingLayers.global[key] : defaults[key];
-          if (!deepEqual(nextVal, baseVal)) {
+          if (!isEqual(nextVal, baseVal)) {
             diff[key] = cloneValue(nextVal);
           }
         }
       }
 
       return diff as Partial<InferSettingsValues<TFields>>;
+    },
+
+    getFieldLabel<K extends keyof TFields & string>(
+      key: K,
+      values?: Readonly<InferSettingsValues<TFields>>,
+    ): string {
+      if (!Object.prototype.hasOwnProperty.call(config.fields, key)) {
+        return key;
+      }
+      const def = config.fields[key]!;
+      const resolvedValues = values ?? defaults;
+      return typeof def.label === "function"
+        ? (def.label as (vals: Readonly<Record<string, unknown>>) => string)(resolvedValues)
+        : def.label;
     },
 
     getFieldDescription<K extends keyof TFields & string>(
@@ -344,22 +438,98 @@ export function defineSettings<TFields extends FieldMap>(
         return def.description;
       }
       if (def.kind === "enum") {
-        const currentValue = resolvedValues[key];
+        const currentValue = (resolvedValues as Record<string, unknown>)[key];
         const opt = def.options.find((o) => o.value === currentValue);
         return opt?.description;
       }
       return undefined;
     },
 
+    getFieldEligibility<K extends keyof TFields & string>(
+      key: K,
+      values?: Readonly<InferSettingsValues<TFields>>,
+    ): ResolvedFieldEligibility {
+      if (!Object.prototype.hasOwnProperty.call(config.fields, key)) {
+        return { eligible: false };
+      }
+      const def = config.fields[key]!;
+      const resolvedValues = values ?? defaults;
+
+      if (def.eligible !== undefined) {
+        const rawEligible =
+          typeof def.eligible === "function"
+            ? (def.eligible as (vals: Readonly<Record<string, unknown>>) => FieldEligibility)(
+                resolvedValues,
+              )
+            : def.eligible;
+        if (typeof rawEligible === "boolean") {
+          if (!rawEligible) {
+            return { eligible: false };
+          }
+        } else if (!rawEligible.eligible) {
+          return rawEligible.reason !== undefined && rawEligible.reason.length > 0
+            ? { eligible: false, reason: rawEligible.reason }
+            : { eligible: false };
+        }
+      }
+
+      if (def.disabled !== undefined) {
+        const rawDisabled =
+          typeof def.disabled === "function"
+            ? (def.disabled as (vals: Readonly<Record<string, unknown>>) => boolean | string)(
+                resolvedValues,
+              )
+            : def.disabled;
+        if (typeof rawDisabled === "string" && rawDisabled.length > 0) {
+          return { eligible: false, reason: rawDisabled };
+        }
+      }
+
+      return { eligible: true };
+    },
+
+    isFieldHardDisabled<K extends keyof TFields & string>(
+      key: K,
+      values?: Readonly<InferSettingsValues<TFields>>,
+    ): boolean {
+      if (!Object.prototype.hasOwnProperty.call(config.fields, key)) {
+        return false;
+      }
+      const def = config.fields[key]!;
+      if (def.disabled === undefined) {
+        return false;
+      }
+      const resolvedValues = values ?? defaults;
+      const rawDisabled =
+        typeof def.disabled === "function"
+          ? (def.disabled as (vals: Readonly<Record<string, unknown>>) => boolean | string)(
+              resolvedValues,
+            )
+          : def.disabled;
+      return rawDisabled === true;
+    },
+
     formatFieldValue<K extends keyof TFields & string>(
       key: K,
-      value: InferSettingsValues<TFields>[K],
+      value: K extends PersistedFieldKeys<TFields> ? InferSettingsValues<TFields>[K] : unknown,
       values?: Readonly<InferSettingsValues<TFields>>,
     ): string {
       if (!Object.prototype.hasOwnProperty.call(config.fields, key)) {
         return String(value ?? "");
       }
       const def = config.fields[key]!;
+      const resolvedValues = values ?? defaults;
+      if (def.kind === "view") {
+        if (def.value !== undefined) {
+          return typeof def.value === "function"
+            ? (def.value as (vals: Readonly<Record<string, unknown>>) => string)(resolvedValues)
+            : def.value;
+        }
+        return "";
+      }
+      if (def.kind === "external") {
+        return typeof def.summary === "string" ? def.summary : "";
+      }
       if (def.format) {
         return (def.format as (v: unknown, vals?: unknown) => string)(value, values);
       }
@@ -368,13 +538,22 @@ export function defineSettings<TFields extends FieldMap>(
 
     getFieldTone<K extends keyof TFields & string>(
       key: K,
-      value: InferSettingsValues<TFields>[K],
+      value: K extends PersistedFieldKeys<TFields> ? InferSettingsValues<TFields>[K] : unknown,
       values?: Readonly<InferSettingsValues<TFields>>,
     ): ValueTone {
       if (!Object.prototype.hasOwnProperty.call(config.fields, key)) {
         return "default";
       }
       const def = config.fields[key]!;
+      const resolvedValues = values ?? defaults;
+      if (!isPersistedFieldDef(def)) {
+        if (def.tone !== undefined) {
+          return typeof def.tone === "function"
+            ? (def.tone as (vals: Readonly<Record<string, unknown>>) => ValueTone)(resolvedValues)
+            : def.tone;
+        }
+        return def.kind === "view" ? "muted" : "default";
+      }
       if (def.tone !== undefined) {
         return typeof def.tone === "function"
           ? (def.tone as (v: unknown, vals?: unknown) => ValueTone)(value, values)

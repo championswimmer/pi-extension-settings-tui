@@ -8,6 +8,7 @@ import {
   wrapTextWithAnsi,
   type Component,
   type Focusable,
+  type KeybindingsManager,
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
@@ -15,8 +16,13 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
   cloneValue,
   deepEqual,
+  isPersistedFieldDef,
   type AnyFieldDef,
   type EnumFieldDef,
+  type ExternalFieldDef,
+  type ExternalSubrouteCloseResult,
+  type ExternalSubrouteParams,
+  type ExternalSummaryResult,
   type FieldMap,
   type FieldProvenance,
   type InferSettingsValues,
@@ -24,9 +30,13 @@ import {
   type ModelSelection,
   type MultiSelectFieldDef,
   type NumberFieldDef,
+  type PersistedFieldKeys,
+  type PickerFieldDef,
   type SaveMode,
   type SettingsScope,
   type StringFieldDef,
+  type ValueTone,
+  type ViewFieldDef,
 } from "../schema/index.js";
 import { ConcurrencyConflictError, type LoadedSettings } from "../store/index.js";
 import {
@@ -46,10 +56,12 @@ import {
 } from "./frame.js";
 import { HitRegionTracker, renderPillRow, type PillItem } from "./hit-test.js";
 import { ConfirmRoute } from "./routes/confirm-route.js";
+import { DynamicPickerRoute } from "./routes/dynamic-picker-route.js";
 import { ModelPickerRoute } from "./routes/model-picker-route.js";
 import { MultiSelectRoute } from "./routes/multi-select-route.js";
 import { SelectRoute } from "./routes/select-route.js";
 import { TextInputRoute } from "./routes/text-input-route.js";
+import { TextViewerRoute, type TextViewerRouteOptions } from "./routes/text-viewer-route.js";
 import type {
   ChildBounds,
   DialogFrame,
@@ -63,15 +75,130 @@ type RootRow<TFields extends FieldMap> =
       readonly kind: "field";
       readonly key: keyof TFields & string;
       readonly def: AnyFieldDef;
-      readonly disabled: boolean;
+      readonly hardDisabled: boolean;
+      readonly eligible: boolean;
+      readonly eligibilityReason?: string;
+      readonly allowedInScope: boolean;
+      readonly scopeTag?: string;
+      readonly scopeReason?: string;
     }
   | { readonly kind: "divider" }
-  | { readonly kind: "scope"; readonly disabled: false }
-  | { readonly kind: "restore"; readonly disabled: false };
+  | { readonly kind: "scope"; readonly hardDisabled: false }
+  | { readonly kind: "restore"; readonly hardDisabled: false };
 
 interface StatusBanner {
   readonly text: string;
   readonly tone: "info" | "warn" | "error" | "success";
+}
+
+interface ExternalSummaryCacheEntry {
+  readonly cacheKey: string;
+  readonly status: "loading" | "ready" | "error";
+  readonly text?: string;
+  readonly tone?: ValueTone;
+  readonly abortController?: AbortController;
+}
+
+function isPromiseLike<T>(value: unknown): value is PromiseLike<T> {
+  return (
+    value !== null &&
+    (typeof value === "object" || typeof value === "function") &&
+    typeof (value as { then?: unknown }).then === "function"
+  );
+}
+
+function isAbortError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    (err.name === "AbortError" || (err as { code?: unknown }).code === "ABORT_ERR")
+  );
+}
+
+function linkAbortSignal(parent: AbortSignal, child: AbortSignal): AbortSignal {
+  if (typeof AbortSignal.any === "function") {
+    return AbortSignal.any([parent, child]);
+  }
+  if (parent.aborted) return parent;
+  if (child.aborted) return child;
+  const combined = new AbortController();
+  const onAbort = () => combined.abort();
+  parent.addEventListener("abort", onAbort, { once: true });
+  child.addEventListener("abort", onAbort, { once: true });
+  return combined.signal;
+}
+
+function countDecimalPlaces(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  const str = String(n).toLowerCase();
+  if (str.includes("e-")) {
+    const [mantissa, expPart] = str.split("e-");
+    const exp = Number.parseInt(expPart ?? "0", 10);
+    const dotIdx = mantissa?.indexOf(".") ?? -1;
+    const mantissaDecimals = dotIdx >= 0 ? mantissa!.length - dotIdx - 1 : 0;
+    return Math.max(0, exp + mantissaDecimals);
+  }
+  const dotIdx = str.indexOf(".");
+  return dotIdx >= 0 ? str.length - dotIdx - 1 : 0;
+}
+
+function roundToStepPrecision(value: number, step: number, baseValue?: number): number {
+  const decimals = Math.min(
+    12,
+    Math.max(
+      countDecimalPlaces(step),
+      baseValue !== undefined ? countDecimalPlaces(baseValue) : 0,
+    ),
+  );
+  if (decimals === 0) {
+    const rounded = Math.round(value);
+    return rounded === 0 ? 0 : rounded;
+  }
+  const rounded = Number(value.toFixed(decimals));
+  return rounded === 0 ? 0 : rounded;
+}
+
+class LoadingRoute implements DialogRouteComponent {
+  readonly title: string;
+  private _focused = false;
+
+  constructor(
+    title: string,
+    private readonly theme: Theme,
+    private readonly keybindings: KeybindingsManager,
+    private readonly onCancel: () => void,
+  ) {
+    this.title = title;
+  }
+
+  get focused(): boolean {
+    return this._focused;
+  }
+
+  set focused(value: boolean) {
+    this._focused = value;
+  }
+
+  invalidate(): void {}
+
+  render(width: number): string[] {
+    return [fitToWidth(this.theme.fg("muted", "  Loading…"), Math.max(8, width))];
+  }
+
+  handleInput(data: string): void {
+    if (this.keybindings.matches(data, "tui.select.cancel") || matchesKey(data, Key.escape)) {
+      this.onCancel();
+    }
+  }
+
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.type === "press" && event.button === "left") {
+      return { handled: true, render: false };
+    }
+    if (event.type === "wheel") {
+      return { handled: true, render: false };
+    }
+    return undefined;
+  }
 }
 
 /**
@@ -102,6 +229,8 @@ export class SettingsDialogComponent<TFields extends FieldMap>
   private pressedRowAlreadySelected = false;
 
   private routeStack: DialogFrame[] = [];
+  private readonly externalSummaries = new Map<string, ExternalSummaryCacheEntry>();
+  private externalSummaryEpoch = 0;
   private statusBanner: StatusBanner | undefined;
   private conflictError = false;
   private isSaving = false;
@@ -165,12 +294,18 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     return tabs[0]?.id ?? "general";
   }
 
-  private isFieldDirty(key: string): boolean {
-    return !deepEqual(this.draftValues[key], this.baselineValues[key]);
+  private isFieldDirty(key: keyof TFields & string): boolean {
+    const def = this.options.schema.fields[key];
+    if (!def || !isPersistedFieldDef(def)) {
+      return false;
+    }
+    const persistedKey = key as PersistedFieldKeys<TFields>;
+    const isEqual = def.kind === "picker" && def.equals ? def.equals : deepEqual;
+    return !isEqual(this.draftValues[persistedKey], this.baselineValues[persistedKey]);
   }
 
-  private getDirtyFieldKeys(): string[] {
-    return Object.keys(this.options.schema.fields).filter((key) => this.isFieldDirty(key));
+  private getDirtyFieldKeys(): PersistedFieldKeys<TFields>[] {
+    return this.options.schema.persistedFieldKeys.filter((key) => this.isFieldDirty(key));
   }
 
   private isDirty(): boolean {
@@ -204,7 +339,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       }
       const rows = this.buildRootRows();
       const idx = rows.findIndex(
-        (r) => r.kind === "field" && r.key === target.field && !r.disabled,
+        (r) => r.kind === "field" && r.key === target.field && !r.hardDisabled,
       );
       if (idx >= 0) {
         this.selectedIndex = idx;
@@ -235,9 +370,10 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     });
   }
 
-  /** Release any resources held by open sub-routes. */
+  /** Release any resources held by open sub-routes and async summary loaders. */
   dispose(): void {
     this.clearRoutes();
+    this.abortExternalSummaries();
   }
 
   invalidate(): void {
@@ -246,23 +382,40 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     }
   }
 
+  private abortExternalSummaries(): void {
+    for (const entry of this.externalSummaries.values()) {
+      entry.abortController?.abort();
+    }
+    this.externalSummaries.clear();
+  }
+
   private clearRoutes(): void {
     while (this.routeStack.length > 0) {
       const frame = this.routeStack.pop();
+      frame?.abortController?.abort();
       frame?.component.dispose?.();
     }
   }
 
-  private pushRoute(title: string, component: DialogRouteComponent): void {
+  private pushRoute(
+    title: string,
+    component: DialogRouteComponent,
+    abortController?: AbortController,
+  ): DialogFrame {
     if (isFocusable(component)) {
       component.focused = this._focused;
     }
-    this.routeStack.push({ title, component });
+    const frame: DialogFrame = abortController
+      ? { title, component, abortController }
+      : { title, component };
+    this.routeStack.push(frame);
     this.options.tui.requestRender();
+    return frame;
   }
 
   private popRoute(): void {
     const popped = this.routeStack.pop();
+    popped?.abortController?.abort();
     popped?.component.dispose?.();
     const top = this.routeStack[this.routeStack.length - 1];
     if (top && isFocusable(top.component)) {
@@ -271,11 +424,59 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     this.options.tui.requestRender();
   }
 
+  private removeFrameByAbort(abortController: AbortController): void {
+    const idx = this.routeStack.findIndex((f) => f.abortController === abortController);
+    if (idx === -1) return;
+    const [removed] = this.routeStack.splice(idx, 1);
+    removed?.abortController?.abort();
+    removed?.component.dispose?.();
+    const top = this.routeStack[this.routeStack.length - 1];
+    if (top && isFocusable(top.component)) {
+      top.component.focused = this._focused;
+    }
+  }
+
   private finish(result: SettingsDialogResult<InferSettingsValues<TFields>>): void {
     if (this.closed) return;
     this.closed = true;
     this.clearRoutes();
+    this.abortExternalSummaries();
     this.options.done(result);
+  }
+
+  private getScopeRestriction(
+    key: keyof TFields & string,
+    def: AnyFieldDef,
+  ):
+    | { readonly allowed: true }
+    | { readonly allowed: false; readonly tag: string; readonly reason: string } {
+    const { schema } = this.options;
+    if (schema.isFieldAllowedInScope(key, this.activeScope)) {
+      return { allowed: true };
+    }
+    const allowedScopes = (def.scopes ?? schema.scopes).filter((s) => schema.scopes.includes(s));
+    if (allowedScopes.length === 1 && allowedScopes[0] === "global") {
+      return {
+        allowed: false,
+        tag: "[Global only]",
+        reason: "Global-only setting. Switch Save scope to Global to edit.",
+      };
+    }
+    if (allowedScopes.length === 1 && allowedScopes[0] === "project") {
+      return {
+        allowed: false,
+        tag: "[Project only]",
+        reason: this.loadedState.trustedProject
+          ? "Project-only setting. Switch Save scope to Project to edit."
+          : "Project-only setting. This project is not trusted, so Project scope is locked.",
+      };
+    }
+    const label = schema.getFieldLabel(key, this.draftValues);
+    return {
+      allowed: false,
+      tag: "[Unavailable]",
+      reason: `${label} cannot be edited in ${this.activeScope} scope.`,
+    };
   }
 
   private buildRootRows(): RootRow<TFields>[] {
@@ -287,15 +488,19 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       if (entry.def.visibleWhen && !entry.def.visibleWhen(this.draftValues)) {
         continue;
       }
-      const disabled =
-        typeof entry.def.disabled === "function"
-          ? entry.def.disabled(this.draftValues)
-          : Boolean(entry.def.disabled);
+      const hardDisabled = schema.isFieldHardDisabled(entry.key, this.draftValues);
+      const eligibility = schema.getFieldEligibility(entry.key, this.draftValues);
+      const scopeCheck = this.getScopeRestriction(entry.key, entry.def);
       rows.push({
         kind: "field",
         key: entry.key,
         def: entry.def,
-        disabled,
+        hardDisabled,
+        eligible: eligibility.eligible,
+        eligibilityReason: eligibility.reason,
+        allowedInScope: scopeCheck.allowed,
+        scopeTag: scopeCheck.allowed ? undefined : scopeCheck.tag,
+        scopeReason: scopeCheck.allowed ? undefined : scopeCheck.reason,
       });
     }
 
@@ -304,16 +509,16 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     }
 
     if (schema.scopes.length > 1) {
-      rows.push({ kind: "scope", disabled: false });
+      rows.push({ kind: "scope", hardDisabled: false });
     }
-    rows.push({ kind: "restore", disabled: false });
+    rows.push({ kind: "restore", hardDisabled: false });
 
     return rows;
   }
 
   private isRowSelectable(row: RootRow<TFields> | undefined): boolean {
     if (!row || row.kind === "divider") return false;
-    return !row.disabled;
+    return !row.hardDisabled;
   }
 
   private findSelectableIndex(
@@ -340,7 +545,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
   private alignSelection(rows: readonly RootRow<TFields>[], preferredKey?: string): void {
     if (preferredKey) {
       const match = rows.findIndex(
-        (r) => r.kind === "field" && r.key === preferredKey && !r.disabled,
+        (r) => r.kind === "field" && r.key === preferredKey && !r.hardDisabled,
       );
       if (match >= 0) {
         this.selectedIndex = match;
@@ -575,7 +780,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
         continue;
       }
 
-      if (!row.disabled) {
+      if (!row.hardDisabled) {
         this.tracker.add({
           y: rowY,
           x0: startX,
@@ -630,6 +835,101 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     return lines.slice(0, maxLines);
   }
 
+  private getExternalSummaryDisplay(
+    key: keyof TFields & string,
+    def: ExternalFieldDef<Record<string, unknown>>,
+  ): { readonly text: string; readonly tone?: ValueTone } {
+    if (def.summary === undefined) {
+      return { text: "Open ›", tone: "muted" };
+    }
+    if (typeof def.summary === "string") {
+      return { text: def.summary };
+    }
+
+    const cacheKey = `${key}:${this.draftVersion}:${this.activeScope}:${this.externalSummaryEpoch}`;
+    const existing = this.externalSummaries.get(key);
+    if (existing && existing.cacheKey === cacheKey) {
+      if (existing.status === "loading") {
+        return { text: "…", tone: "muted" };
+      }
+      if (existing.status === "ready") {
+        return { text: existing.text ?? "", tone: existing.tone };
+      }
+      return { text: existing.text ?? "Error", tone: existing.tone ?? "error" };
+    }
+
+    existing?.abortController?.abort();
+    const controller = new AbortController();
+    this.externalSummaries.set(key, {
+      cacheKey,
+      status: "loading",
+      abortController: controller,
+    });
+
+    const normalizeSummary = (
+      res: ExternalSummaryResult,
+    ): { readonly text: string; readonly tone?: ValueTone } =>
+      typeof res === "string" ? { text: res } : { text: res.text, tone: res.tone };
+
+    let result: ExternalSummaryResult | Promise<ExternalSummaryResult>;
+    try {
+      result = def.summary({
+        draft: cloneValue(this.draftValues),
+        scope: this.activeScope,
+        signal: controller.signal,
+      });
+    } catch {
+      this.externalSummaries.set(key, {
+        cacheKey,
+        status: "error",
+        text: "Error",
+        tone: "error",
+      });
+      return { text: "Error", tone: "error" };
+    }
+
+    if (!isPromiseLike<ExternalSummaryResult>(result)) {
+      const normalized = normalizeSummary(result);
+      this.externalSummaries.set(key, {
+        cacheKey,
+        status: "ready",
+        text: normalized.text,
+        tone: normalized.tone,
+      });
+      return normalized;
+    }
+
+    Promise.resolve(result).then(
+      (resolved) => {
+        if (this.closed || controller.signal.aborted) return;
+        const current = this.externalSummaries.get(key);
+        if (!current || current.cacheKey !== cacheKey) return;
+        const normalized = normalizeSummary(resolved);
+        this.externalSummaries.set(key, {
+          cacheKey,
+          status: "ready",
+          text: normalized.text,
+          tone: normalized.tone,
+        });
+        this.options.tui.requestRender();
+      },
+      () => {
+        if (this.closed || controller.signal.aborted) return;
+        const current = this.externalSummaries.get(key);
+        if (!current || current.cacheKey !== cacheKey) return;
+        this.externalSummaries.set(key, {
+          cacheKey,
+          status: "error",
+          text: "Error",
+          tone: "error",
+        });
+        this.options.tui.requestRender();
+      },
+    );
+
+    return { text: "…", tone: "muted" };
+  }
+
   private renderRootRow(
     row: Exclude<RootRow<TFields>, { kind: "divider" }>,
     isSelected: boolean,
@@ -659,21 +959,54 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       return this.formatColumns(cursor, label, "   ", valueText, innerWidth, isMultiScope);
     }
 
-    const { key, def, disabled } = row;
-    const value = this.draftValues[key];
-    const formatted = schema.formatFieldValue(key, value, this.draftValues);
-    const tone = schema.getFieldTone(key, value, this.draftValues);
+    const { key, def, hardDisabled, eligible, allowedInScope, scopeTag } = row;
+    const fieldLabel = schema.getFieldLabel(key, this.draftValues);
+    const isPersisted = isPersistedFieldDef(def);
+    const isDimmed = hardDisabled || !eligible || !allowedInScope;
 
+    let formatted: string;
+    let tone: ValueTone;
+
+    if (def.kind === "external") {
+      const summary = this.getExternalSummaryDisplay(
+        key,
+        def as ExternalFieldDef<Record<string, unknown>>,
+      );
+      formatted = summary.text;
+      tone = summary.tone ?? schema.getFieldTone(key, undefined as never, this.draftValues);
+    } else if (def.kind === "view") {
+      const rawFormatted = schema.formatFieldValue(key, undefined as never, this.draftValues);
+      formatted = def.value !== undefined ? rawFormatted : "View ›";
+      tone = schema.getFieldTone(key, undefined as never, this.draftValues);
+    } else {
+      const persistedKey = key as PersistedFieldKeys<TFields>;
+      const value = this.draftValues[persistedKey];
+      formatted = schema.formatFieldValue(persistedKey, value as never, this.draftValues);
+      tone = schema.getFieldTone(persistedKey, value as never, this.draftValues);
+    }
+
+    const scopeBadge = !allowedInScope && scopeTag ? ` ${theme.fg("dim", scopeTag)}` : "";
     const labBadge = def.experimental ? ` ${theme.fg("warning", "[lab]")}` : "";
     const dirtyMarker =
-      this.saveMode === "draft" && this.isFieldDirty(key) ? ` ${theme.fg("warning", "*")}` : "";
-    const labelText = disabled
-      ? theme.fg("dim", def.label) + labBadge + dirtyMarker
-      : theme.fg(isSelected ? "accent" : "text", def.label) + labBadge + dirtyMarker;
+      isPersisted && this.saveMode === "draft" && this.isFieldDirty(key)
+        ? ` ${theme.fg("warning", "*")}`
+        : "";
+    const labelText = isDimmed
+      ? theme.fg("dim", fieldLabel) + scopeBadge + labBadge + dirtyMarker
+      : theme.fg(isSelected ? "accent" : "text", fieldLabel) + labBadge + dirtyMarker;
 
-    const provenance = this.loadedState.provenance[key] ?? "default";
-    const provCells = isMultiScope ? this.renderProvenanceCells(provenance, theme) : "";
-    const valueText = disabled
+    let provCells = "";
+    if (isMultiScope) {
+      if (isPersisted) {
+        const persistedKey = key as PersistedFieldKeys<TFields>;
+        const provenance = this.loadedState.provenance[persistedKey] ?? "default";
+        provCells = this.renderProvenanceCells(provenance, theme);
+      } else {
+        provCells = "   ";
+      }
+    }
+
+    const valueText = isDimmed
       ? theme.fg("dim", formatted)
       : theme.fg(toneToThemeColor(tone), formatted);
 
@@ -725,7 +1058,19 @@ export class SettingsDialogComponent<TFields extends FieldMap>
               ? "success"
               : "muted";
     } else if (selectedRow?.kind === "field") {
-      text = this.options.schema.getFieldDescription(selectedRow.key, this.draftValues) ?? "";
+      if (!selectedRow.allowedInScope) {
+        text =
+          selectedRow.scopeReason ??
+          this.options.schema.getFieldDescription(selectedRow.key, this.draftValues) ??
+          "";
+      } else if (!selectedRow.eligible) {
+        text =
+          selectedRow.eligibilityReason ??
+          this.options.schema.getFieldDescription(selectedRow.key, this.draftValues) ??
+          "";
+      } else {
+        text = this.options.schema.getFieldDescription(selectedRow.key, this.draftValues) ?? "";
+      }
     } else if (selectedRow?.kind === "scope") {
       text = this.loadedState.trustedProject
         ? "Choose whether edits write to your user-global file or this project."
@@ -862,6 +1207,9 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     if (keybindings.matches(data, "tui.select.up") || matchesKey(data, Key.up)) {
       const prev = this.findSelectableIndex(rows, this.selectedIndex - 1, -1, true);
       if (prev >= 0) {
+        if (prev !== this.selectedIndex && !this.conflictError) {
+          this.statusBanner = undefined;
+        }
         this.selectedIndex = prev;
         this.scrollOffset = ensureIndexInWindow(
           this.selectedIndex,
@@ -876,6 +1224,9 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     if (keybindings.matches(data, "tui.select.down") || matchesKey(data, Key.down)) {
       const next = this.findSelectableIndex(rows, this.selectedIndex + 1, 1, true);
       if (next >= 0) {
+        if (next !== this.selectedIndex && !this.conflictError) {
+          this.statusBanner = undefined;
+        }
         this.selectedIndex = next;
         this.scrollOffset = ensureIndexInWindow(
           this.selectedIndex,
@@ -901,6 +1252,9 @@ export class SettingsDialogComponent<TFields extends FieldMap>
           ? this.findSelectableIndex(rows, pageTarget, direction)
           : this.findSelectableIndex(rows, pageTarget, direction === 1 ? -1 : 1);
       if (landed >= 0) {
+        if (landed !== this.selectedIndex && !this.conflictError) {
+          this.statusBanner = undefined;
+        }
         this.selectedIndex = landed;
         this.scrollOffset = ensureIndexInWindow(
           this.selectedIndex,
@@ -955,6 +1309,9 @@ export class SettingsDialogComponent<TFields extends FieldMap>
         const target = rows[hit.index];
         if (this.isRowSelectable(target)) {
           this.pressedRowAlreadySelected = hit.index === this.selectedIndex;
+          if (!this.pressedRowAlreadySelected && !this.conflictError) {
+            this.statusBanner = undefined;
+          }
           this.selectedIndex = hit.index;
           return { handled: true, focus: true, render: true };
         }
@@ -980,9 +1337,12 @@ export class SettingsDialogComponent<TFields extends FieldMap>
         const target = rows[hit.index];
         if (this.isRowSelectable(target)) {
           this.selectedIndex = hit.index;
+          const isBlockedField =
+            target?.kind === "field" && (!target.allowedInScope || !target.eligible);
           const isImmediateClickRow =
             target?.kind === "scope" ||
             target?.kind === "restore" ||
+            isBlockedField ||
             (target?.kind === "field" && target.def.kind === "boolean");
           const shouldActivate =
             isImmediateClickRow || event.clickCount === 2 || this.pressedRowAlreadySelected;
@@ -1135,6 +1495,25 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     };
   }
 
+  private handleBlockedFieldRow(row: Extract<RootRow<TFields>, { kind: "field" }>): boolean {
+    const label = this.options.schema.getFieldLabel(row.key, this.draftValues);
+    if (!row.allowedInScope) {
+      this.statusBanner = {
+        text: row.scopeReason ?? `${label} cannot be edited in ${this.activeScope} scope.`,
+        tone: "warn",
+      };
+      return true;
+    }
+    if (!row.eligible) {
+      this.statusBanner = {
+        text: row.eligibilityReason ?? `${label} is currently unavailable.`,
+        tone: "warn",
+      };
+      return true;
+    }
+    return false;
+  }
+
   private handleInlineStep(row: RootRow<TFields> | undefined, direction: 1 | -1): void {
     if (!this.isRowSelectable(row) || !row || row.kind === "divider") return;
 
@@ -1143,31 +1522,39 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       return;
     }
     if (row.kind !== "field") return;
+    if (this.handleBlockedFieldRow(row)) return;
 
     const { key, def } = row;
+    if (!isPersistedFieldDef(def)) return;
+    const persistedKey = key as PersistedFieldKeys<TFields>;
+
     if (def.kind === "boolean") {
-      this.commitFieldValue(key, !this.draftValues[key]);
+      this.commitFieldValue(persistedKey, !this.draftValues[persistedKey]);
       return;
     }
     if (def.kind === "enum") {
-      const current = this.draftValues[key] as string;
+      const allowInline = def.allowInlineStep ?? def.display !== "picker";
+      if (!allowInline) {
+        return;
+      }
+      const current = this.draftValues[persistedKey] as string;
       const idx = def.options.findIndex((o) => o.value === current);
       if (def.options.length > 0) {
         const nextIdx =
           idx < 0 ? 0 : (idx + direction + def.options.length) % def.options.length;
-        this.commitFieldValue(key, def.options[nextIdx]!.value);
+        this.commitFieldValue(persistedKey, def.options[nextIdx]!.value);
       }
       return;
     }
     if (def.kind === "number") {
       const numDef = def as NumberFieldDef<Record<string, unknown>>;
       const step = numDef.step ?? 1;
-      const current = Number(this.draftValues[key]);
+      const current = Number(this.draftValues[persistedKey]);
       if (Number.isFinite(current)) {
-        const rawNext = current + direction * step;
-        const checked = this.options.schema.validateField(key, rawNext);
+        const rawNext = roundToStepPrecision(current + direction * step, step, current);
+        const checked = this.options.schema.validateField(persistedKey, rawNext);
         if (checked.ok) {
-          this.commitFieldValue(key, checked.value);
+          this.commitFieldValue(persistedKey, checked.value);
         } else {
           this.statusBanner = { text: checked.error, tone: "warn" };
         }
@@ -1188,40 +1575,59 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       return;
     }
 
+    if (this.handleBlockedFieldRow(row)) return;
+
     const { key, def } = row;
-    const currentValue = this.draftValues[key];
+    if (def.kind === "view") {
+      this.openViewRoute(key, def as ViewFieldDef<Record<string, unknown>>);
+      return;
+    }
+    if (def.kind === "external") {
+      this.openExternalRoute(key, def as ExternalFieldDef<Record<string, unknown>>);
+      return;
+    }
+
+    const persistedKey = key as PersistedFieldKeys<TFields>;
+    const currentValue = this.draftValues[persistedKey];
 
     switch (def.kind) {
       case "boolean":
-        this.commitFieldValue(key, !currentValue);
+        this.commitFieldValue(persistedKey, !currentValue);
         break;
       case "enum":
-        this.activateEnumField(key, def, currentValue as string);
+        this.activateEnumField(persistedKey, def, currentValue as string);
         break;
       case "multiSelect":
-        this.openMultiSelectRoute(key, def, currentValue as string[]);
+        this.openMultiSelectRoute(persistedKey, def, currentValue as string[]);
         break;
       case "string":
-        this.openStringRoute(key, def, String(currentValue ?? ""));
+        this.openStringRoute(persistedKey, def, String(currentValue ?? ""));
         break;
       case "number":
-        this.openNumberRoute(key, def, Number(currentValue));
+        this.openNumberRoute(persistedKey, def, Number(currentValue));
         break;
       case "model":
         this.openModelRoute(
-          key,
+          persistedKey,
           def,
           (currentValue as ModelSelection | string | null) ?? null,
         );
         break;
+      case "picker":
+        this.openPickerRoute(
+          persistedKey,
+          def as PickerFieldDef<unknown, Record<string, unknown>>,
+          currentValue,
+        );
+        break;
       case "custom":
-        this.openCustomRoute(key, def, currentValue);
+        this.openCustomRoute(persistedKey, def, currentValue);
         break;
     }
   }
 
   private activateEnumField(
-    key: keyof TFields & string,
+    key: PersistedFieldKeys<TFields>,
     def: EnumFieldDef<string, Record<string, unknown>>,
     currentValue: string,
   ): void {
@@ -1235,8 +1641,10 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       return;
     }
 
+    const label = this.options.schema.getFieldLabel(key, this.draftValues);
+    const frameAbort = new AbortController();
     const route = new SelectRoute({
-      title: def.label,
+      title: label,
       description: this.options.schema.getFieldDescription(key, this.draftValues),
       options: def.options,
       currentValue,
@@ -1251,17 +1659,19 @@ export class SettingsDialogComponent<TFields extends FieldMap>
         this.popRoute();
       },
     });
-    this.pushRoute(def.label, route);
+    this.pushRoute(label, route, frameAbort);
   }
 
   private openMultiSelectRoute(
-    key: keyof TFields & string,
+    key: PersistedFieldKeys<TFields>,
     def: MultiSelectFieldDef<string, Record<string, unknown>>,
     currentValues: readonly string[],
   ): void {
+    const label = this.options.schema.getFieldLabel(key, this.draftValues);
+    const frameAbort = new AbortController();
     const resolvedOptions = typeof def.options === "function" ? def.options() : def.options;
     const route = new MultiSelectRoute({
-      title: def.label,
+      title: label,
       description: this.options.schema.getFieldDescription(key, this.draftValues),
       options: resolvedOptions,
       initialValues: currentValues,
@@ -1286,16 +1696,18 @@ export class SettingsDialogComponent<TFields extends FieldMap>
         this.popRoute();
       },
     });
-    this.pushRoute(def.label, route);
+    this.pushRoute(label, route, frameAbort);
   }
 
   private openStringRoute(
-    key: keyof TFields & string,
+    key: PersistedFieldKeys<TFields>,
     def: StringFieldDef<Record<string, unknown>>,
     currentValue: string,
   ): void {
+    const label = this.options.schema.getFieldLabel(key, this.draftValues);
+    const frameAbort = new AbortController();
     const route = new TextInputRoute({
-      title: def.label,
+      title: label,
       description: this.options.schema.getFieldDescription(key, this.draftValues),
       initialValue: currentValue,
       placeholder: def.placeholder,
@@ -1318,17 +1730,19 @@ export class SettingsDialogComponent<TFields extends FieldMap>
         this.popRoute();
       },
     });
-    this.pushRoute(def.label, route);
+    this.pushRoute(label, route, frameAbort);
   }
 
   private openNumberRoute(
-    key: keyof TFields & string,
+    key: PersistedFieldKeys<TFields>,
     def: NumberFieldDef<Record<string, unknown>>,
     currentValue: number,
   ): void {
+    const label = this.options.schema.getFieldLabel(key, this.draftValues);
     const unitSuffix = def.unit ? ` (${def.unit})` : "";
+    const frameAbort = new AbortController();
     const route = new TextInputRoute({
-      title: `${def.label}${unitSuffix}`,
+      title: `${label}${unitSuffix}`,
       description: this.options.schema.getFieldDescription(key, this.draftValues),
       initialValue: Number.isFinite(currentValue) ? String(currentValue) : "",
       placeholder: def.placeholder ?? "Enter a number",
@@ -1360,14 +1774,16 @@ export class SettingsDialogComponent<TFields extends FieldMap>
         this.popRoute();
       },
     });
-    this.pushRoute(def.label, route);
+    this.pushRoute(label, route, frameAbort);
   }
 
   private openModelRoute(
-    key: keyof TFields & string,
+    key: PersistedFieldKeys<TFields>,
     def: ModelFieldDef<boolean, Record<string, unknown>, boolean>,
     currentValue: ModelSelection | string | null,
   ): void {
+    const label = this.options.schema.getFieldLabel(key, this.draftValues);
+    const frameAbort = new AbortController();
     const resolvedAvailable =
       def.models !== undefined
         ? typeof def.models === "function"
@@ -1398,7 +1814,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     };
 
     const commonOptions = {
-      title: def.label,
+      title: label,
       description: this.options.schema.getFieldDescription(key, this.draftValues),
       availableModels: resolvedAvailable,
       scopedModels: resolvedScoped,
@@ -1433,30 +1849,240 @@ export class SettingsDialogComponent<TFields extends FieldMap>
                 : null,
             onSelect,
           });
-    this.pushRoute(def.label, route);
+    this.pushRoute(label, route, frameAbort);
+  }
+
+  private openViewRoute(
+    key: keyof TFields & string,
+    def: ViewFieldDef<Record<string, unknown>>,
+  ): void {
+    const label = this.options.schema.getFieldLabel(key, this.draftValues);
+    const frameAbort = new AbortController();
+    const content: TextViewerRouteOptions["content"] =
+      typeof def.content === "function"
+        ? (routeSignal) =>
+            (def.content as (ctx: {
+              readonly draft: Readonly<Record<string, unknown>>;
+              readonly scope: SettingsScope;
+              readonly signal: AbortSignal;
+            }) => string | Promise<string>)({
+              draft: cloneValue(this.draftValues),
+              scope: this.activeScope,
+              signal: linkAbortSignal(frameAbort.signal, routeSignal),
+            })
+        : def.content;
+
+    const route = new TextViewerRoute({
+      title: label,
+      description: this.options.schema.getFieldDescription(key, this.draftValues),
+      format: def.format ?? "markdown",
+      refreshable: def.refreshable,
+      content,
+      tui: this.options.tui,
+      theme: this.options.theme,
+      keybindings: this.options.keybindings,
+      getMaxHeight: () => this.lastSubrouteBodyBudget,
+      onCancel: () => {
+        this.popRoute();
+      },
+    });
+    this.pushRoute(label, route, frameAbort);
+  }
+
+  private openExternalRoute(
+    key: keyof TFields & string,
+    def: ExternalFieldDef<Record<string, unknown>>,
+  ): void {
+    const label = this.options.schema.getFieldLabel(key, this.draftValues);
+    const frameAbort = new AbortController();
+    let subrouteClosed = false;
+
+    const close = (result?: ExternalSubrouteCloseResult): void => {
+      if (subrouteClosed) return;
+      subrouteClosed = true;
+      this.removeFrameByAbort(frameAbort);
+      this.externalSummaryEpoch++;
+      if (result?.message) {
+        this.statusBanner = {
+          text: result.message,
+          tone: result.tone ?? "info",
+        };
+      }
+      this.options.tui.requestRender();
+    };
+
+    const params: ExternalSubrouteParams<Record<string, unknown>> = {
+      fieldKey: key,
+      field: def,
+      draft: cloneValue(this.draftValues),
+      scope: this.activeScope,
+      tui: this.options.tui,
+      theme: this.options.theme,
+      keybindings: this.options.keybindings,
+      signal: frameAbort.signal,
+      getMaxHeight: () => this.lastSubrouteBodyBudget,
+      requestRender: () => this.options.tui.requestRender(),
+      close,
+    };
+
+    let returned: unknown;
+    try {
+      returned = def.openSubroute(params);
+    } catch (err) {
+      frameAbort.abort();
+      if (!isAbortError(err)) {
+        this.statusBanner = {
+          text: err instanceof Error ? err.message : String(err),
+          tone: "error",
+        };
+      }
+      return;
+    }
+
+    if (isPromiseLike<unknown>(returned)) {
+      const loadingRoute = new LoadingRoute(
+        label,
+        this.options.theme,
+        this.options.keybindings,
+        () => {
+          this.popRoute();
+        },
+      );
+      const loadingFrame = this.pushRoute(label, loadingRoute, frameAbort);
+
+      Promise.resolve(returned).then(
+        (resolved) => {
+          const maybeComp = resolved as DialogRouteComponent | undefined;
+          if (this.closed || frameAbort.signal.aborted || subrouteClosed) {
+            maybeComp?.dispose?.();
+            return;
+          }
+          const idx = this.routeStack.indexOf(loadingFrame);
+          if (idx === -1) {
+            maybeComp?.dispose?.();
+            return;
+          }
+          if (maybeComp && typeof maybeComp.render === "function") {
+            if (isFocusable(maybeComp)) {
+              maybeComp.focused = this._focused && idx === this.routeStack.length - 1;
+            }
+            this.routeStack[idx] = {
+              title: maybeComp.title ?? label,
+              component: maybeComp,
+              abortController: frameAbort,
+            };
+            this.options.tui.requestRender();
+          } else {
+            this.removeFrameByAbort(frameAbort);
+            this.statusBanner = {
+              text: `${label} did not return a valid sub-route component.`,
+              tone: "warn",
+            };
+            this.options.tui.requestRender();
+          }
+        },
+        (err: unknown) => {
+          if (this.closed || frameAbort.signal.aborted || subrouteClosed || isAbortError(err)) {
+            return;
+          }
+          this.removeFrameByAbort(frameAbort);
+          this.statusBanner = {
+            text: err instanceof Error ? err.message : String(err),
+            tone: "error",
+          };
+          this.options.tui.requestRender();
+        },
+      );
+      return;
+    }
+
+    if (returned && typeof (returned as Component).render === "function") {
+      const routeComp = returned as DialogRouteComponent;
+      this.pushRoute(routeComp.title ?? label, routeComp, frameAbort);
+    } else {
+      frameAbort.abort();
+      this.statusBanner = {
+        text: `${label} did not return a valid sub-route component.`,
+        tone: "warn",
+      };
+    }
+  }
+
+  private openPickerRoute(
+    key: PersistedFieldKeys<TFields>,
+    def: PickerFieldDef<unknown, Record<string, unknown>>,
+    currentValue: unknown,
+  ): void {
+    const label = this.options.schema.getFieldLabel(key, this.draftValues);
+    const frameAbort = new AbortController();
+
+    const route = new DynamicPickerRoute({
+      title: label,
+      description: this.options.schema.getFieldDescription(key, this.draftValues),
+      loadOptions: (routeSignal) =>
+        def.loadOptions({
+          draft: cloneValue(this.draftValues),
+          scope: this.activeScope,
+          signal: linkAbortSignal(frameAbort.signal, routeSignal),
+        }),
+      currentValue: cloneValue(currentValue),
+      equals: def.equals,
+      allowClear: def.allowClear,
+      clearValue: def.clearValue,
+      emptyLabel: def.emptyLabel,
+      emptyDescription: def.emptyDescription,
+      searchable: def.searchable,
+      refreshable: def.refreshable,
+      validateSelection: def.validateSelection
+        ? (opt, routeSignal) =>
+            def.validateSelection!(opt, {
+              draft: cloneValue(this.draftValues),
+              scope: this.activeScope,
+              signal: linkAbortSignal(frameAbort.signal, routeSignal),
+            })
+        : undefined,
+      tui: this.options.tui,
+      theme: this.options.theme,
+      keybindings: this.options.keybindings,
+      getMaxHeight: () => this.lastSubrouteBodyBudget,
+      onSelect: (next) => {
+        this.popRoute();
+        this.commitFieldValue(key, next);
+      },
+      onCancel: () => {
+        this.popRoute();
+      },
+    });
+    this.pushRoute(label, route, frameAbort);
   }
 
   private openCustomRoute(
-    key: keyof TFields & string,
+    key: PersistedFieldKeys<TFields>,
     def: Extract<AnyFieldDef, { kind: "custom" }>,
     currentValue: unknown,
   ): void {
+    const label = this.options.schema.getFieldLabel(key, this.draftValues);
     if (!def.openSubroute) {
       this.statusBanner = {
-        text: `${def.label} does not provide an interactive editor.`,
+        text: `${label} does not provide an interactive editor.`,
         tone: "warn",
       };
       return;
     }
 
+    const frameAbort = new AbortController();
     const customComp = def.openSubroute({
       fieldKey: key,
       field: def,
       value: cloneValue(currentValue),
       draft: cloneValue(this.draftValues),
+      scope: this.activeScope,
       tui: this.options.tui,
       theme: this.options.theme,
       keybindings: this.options.keybindings,
+      signal: frameAbort.signal,
+      getMaxHeight: () => this.lastSubrouteBodyBudget,
+      requestRender: () => this.options.tui.requestRender(),
       commit: (next) => {
         const checked = this.options.schema.validateField(key, next);
         if (!checked.ok) {
@@ -1467,6 +2093,13 @@ export class SettingsDialogComponent<TFields extends FieldMap>
         this.popRoute();
         this.commitFieldValue(key, checked.value);
       },
+      commitFields: (patch) => {
+        this.commitMultipleFields(patch as Partial<InferSettingsValues<TFields>>, key);
+      },
+      notify: (message, tone) => {
+        this.statusBanner = { text: message, tone: tone ?? "info" };
+        this.options.tui.requestRender();
+      },
       cancel: () => {
         this.popRoute();
       },
@@ -1474,10 +2107,11 @@ export class SettingsDialogComponent<TFields extends FieldMap>
 
     if (customComp && typeof (customComp as Component).render === "function") {
       const routeComp = customComp as DialogRouteComponent;
-      this.pushRoute(routeComp.title ?? def.label, routeComp);
+      this.pushRoute(routeComp.title ?? label, routeComp, frameAbort);
     } else {
+      frameAbort.abort();
       this.statusBanner = {
-        text: `${def.label} did not return a valid sub-route component.`,
+        text: `${label} did not return a valid sub-route component.`,
         tone: "warn",
       };
     }
@@ -1485,6 +2119,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
 
   private openRestoreDefaultsConfirm(): void {
     const scopeName = this.activeScope === "project" ? "Project" : "Global";
+    const frameAbort = new AbortController();
     const route = new ConfirmRoute({
       title: "Restore defaults",
       message: `Restore defaults for ${scopeName} scope?`,
@@ -1506,21 +2141,68 @@ export class SettingsDialogComponent<TFields extends FieldMap>
         this.popRoute();
       },
     });
-    this.pushRoute("Restore defaults", route);
+    this.pushRoute("Restore defaults", route, frameAbort);
   }
 
-  private commitFieldValue(key: keyof TFields & string, nextValue: unknown): void {
+  private applyNormalizeDraft(
+    candidate: InferSettingsValues<TFields>,
+    changedKey: PersistedFieldKeys<TFields>,
+    prevDraft: InferSettingsValues<TFields>,
+  ): { readonly ok: true; readonly values: InferSettingsValues<TFields> } | { readonly ok: false; readonly error: string } {
+    const { schema } = this.options;
+    if (!schema.normalizeDraft) {
+      return { ok: true, values: candidate };
+    }
+
+    let normalized: InferSettingsValues<TFields>;
+    try {
+      normalized = schema.normalizeDraft(
+        cloneValue(candidate),
+        changedKey,
+        cloneValue(prevDraft),
+      );
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    const finalValues = cloneValue(normalized);
+    for (const persistedKey of schema.persistedFieldKeys) {
+      if (!deepEqual(finalValues[persistedKey], candidate[persistedKey])) {
+        const recheck = schema.validateField(persistedKey, finalValues[persistedKey]);
+        if (!recheck.ok) {
+          const fieldLabel = schema.getFieldLabel(persistedKey, finalValues);
+          return { ok: false, error: `${fieldLabel}: ${recheck.error}` };
+        }
+        finalValues[persistedKey] = recheck.value;
+      }
+    }
+
+    return { ok: true, values: finalValues };
+  }
+
+  private commitFieldValue(key: PersistedFieldKeys<TFields>, nextValue: unknown): void {
     const checked = this.options.schema.validateField(key, nextValue);
     if (!checked.ok) {
       this.statusBanner = { text: checked.error, tone: "error" };
       return;
     }
 
-    const updated = {
-      ...this.draftValues,
+    const prevDraft = this.draftValues;
+    const candidate = {
+      ...prevDraft,
       [key]: checked.value,
     } as InferSettingsValues<TFields>;
 
+    const normalizedResult = this.applyNormalizeDraft(candidate, key, prevDraft);
+    if (!normalizedResult.ok) {
+      this.statusBanner = { text: normalizedResult.error, tone: "error" };
+      return;
+    }
+
+    const updated = normalizedResult.values;
     this.draftValues = updated;
     this.draftVersion++;
     this.statusBanner = undefined;
@@ -1530,6 +2212,92 @@ export class SettingsDialogComponent<TFields extends FieldMap>
 
     if (this.saveMode === "immediate") {
       void this.persistDraft(updated, false);
+    }
+  }
+
+  private commitMultipleFields(
+    patch: Partial<InferSettingsValues<TFields>>,
+    primaryKey?: PersistedFieldKeys<TFields>,
+  ): void {
+    const { schema } = this.options;
+    const validatedEntries: Array<[PersistedFieldKeys<TFields>, unknown]> = [];
+
+    for (const [rawKey, rawValue] of Object.entries(patch)) {
+      if (rawValue === undefined) continue;
+      if (!Object.prototype.hasOwnProperty.call(schema.fields, rawKey)) {
+        this.statusBanner = { text: `Unknown setting "${rawKey}".`, tone: "error" };
+        if (this.routeStack.length > 0) this.popRoute();
+        return;
+      }
+      const fieldDef = schema.fields[rawKey]!;
+      if (!isPersistedFieldDef(fieldDef)) {
+        this.statusBanner = {
+          text: `"${rawKey}" is not a persisted setting.`,
+          tone: "error",
+        };
+        if (this.routeStack.length > 0) this.popRoute();
+        return;
+      }
+      const persistedKey = rawKey as PersistedFieldKeys<TFields>;
+      if (!schema.isFieldAllowedInScope(persistedKey, this.activeScope)) {
+        const restriction = this.getScopeRestriction(persistedKey, fieldDef);
+        this.statusBanner = {
+          text: restriction.allowed
+            ? `${schema.getFieldLabel(persistedKey, this.draftValues)} cannot be edited in ${this.activeScope} scope.`
+            : restriction.reason,
+          tone: "warn",
+        };
+        if (this.routeStack.length > 0) this.popRoute();
+        return;
+      }
+      const checked = schema.validateField(persistedKey, rawValue);
+      if (!checked.ok) {
+        const fieldLabel = schema.getFieldLabel(persistedKey, this.draftValues);
+        this.statusBanner = { text: `${fieldLabel}: ${checked.error}`, tone: "error" };
+        if (this.routeStack.length > 0) this.popRoute();
+        return;
+      }
+      validatedEntries.push([persistedKey, checked.value]);
+    }
+
+    if (validatedEntries.length === 0) {
+      if (this.routeStack.length > 0) this.popRoute();
+      return;
+    }
+
+    const prevDraft = this.draftValues;
+    const candidate = cloneValue(prevDraft);
+    for (const [k, val] of validatedEntries) {
+      (candidate as Record<string, unknown>)[k] = val;
+    }
+
+    const changedKey =
+      primaryKey && validatedEntries.some(([k]) => k === primaryKey)
+        ? primaryKey
+        : validatedEntries[0]![0];
+    const normalizedResult = this.applyNormalizeDraft(candidate, changedKey, prevDraft);
+    if (!normalizedResult.ok) {
+      this.statusBanner = { text: normalizedResult.error, tone: "error" };
+      if (this.routeStack.length > 0) this.popRoute();
+      return;
+    }
+
+    if (this.routeStack.length > 0) {
+      this.popRoute();
+    }
+
+    const updated = normalizedResult.values;
+    this.draftValues = updated;
+    this.draftVersion++;
+    this.statusBanner = undefined;
+
+    const rows = this.buildRootRows();
+    this.alignSelection(rows, primaryKey ?? changedKey);
+
+    if (this.saveMode === "immediate") {
+      void this.persistDraft(updated, false);
+    } else {
+      this.options.tui.requestRender();
     }
   }
 

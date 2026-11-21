@@ -2,11 +2,14 @@ import type {
   BooleanFieldDef,
   CustomFieldDef,
   EnumFieldDef,
+  ExternalFieldDef,
   ModelFieldDef,
   ModelSelection,
   MultiSelectFieldDef,
   NumberFieldDef,
+  PickerFieldDef,
   StringFieldDef,
+  ViewFieldDef,
 } from "./types.js";
 
 function booleanField<TValues extends Record<string, unknown> = Record<string, unknown>>(
@@ -104,6 +107,27 @@ function modelField<TValues extends Record<string, unknown> = Record<string, unk
   };
 }
 
+function pickerField<
+  T,
+  TValues extends Record<string, unknown> = Record<string, unknown>,
+>(
+  opts: Omit<PickerFieldDef<T, TValues>, "kind">,
+): PickerFieldDef<T, TValues> {
+  return { ...opts, kind: "picker" };
+}
+
+function viewField<TValues extends Record<string, unknown> = Record<string, unknown>>(
+  opts: Omit<ViewFieldDef<TValues>, "kind">,
+): ViewFieldDef<TValues> {
+  return { ...opts, kind: "view" };
+}
+
+function externalField<TValues extends Record<string, unknown> = Record<string, unknown>>(
+  opts: Omit<ExternalFieldDef<TValues>, "kind">,
+): ExternalFieldDef<TValues> {
+  return { ...opts, kind: "external" };
+}
+
 function customField<
   T,
   TValues extends Record<string, unknown> = Record<string, unknown>,
@@ -121,5 +145,8 @@ export const field = {
   number: numberField,
   integer: integerField,
   model: modelField,
+  picker: pickerField,
+  view: viewField,
+  external: externalField,
   custom: customField,
 } as const;

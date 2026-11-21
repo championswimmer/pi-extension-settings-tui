@@ -5,12 +5,14 @@ import {
   deepEqual,
   formatModelIdentity,
   getSupportedThinkingLevelsForModel,
+  isPersistedFieldDef,
   MODEL_THINKING_LEVEL_DESCRIPTIONS,
   parseModelIdentity,
   stripControlChars,
   type AnyFieldDef,
   type BooleanFieldDef,
   type CustomFieldDef,
+  type DynamicPickerOption,
   type EnumFieldDef,
   type FieldMap,
   type FieldProvenance,
@@ -22,6 +24,8 @@ import {
   type ModelThinkingLevel,
   type MultiSelectFieldDef,
   type NumberFieldDef,
+  type PersistedFieldKeys,
+  type PickerFieldDef,
   type SettingsSchema,
   type SettingsScope,
   type StringFieldDef,
@@ -78,14 +82,36 @@ function formatProvenanceBadge(provenance: FieldProvenance): string {
   }
 }
 
-function isFieldDisabled<TValues extends Record<string, unknown>>(
+function getScopeRestrictionInfo<TFields extends FieldMap>(
+  schema: SettingsSchema<TFields>,
+  key: keyof TFields & string,
   def: AnyFieldDef,
-  values: Readonly<TValues>,
-): boolean {
-  if (typeof def.disabled === "function") {
-    return def.disabled(values);
+  scope: SettingsScope,
+  trustedProject: boolean,
+  label: string,
+): { readonly tag: string; readonly reason: string } | undefined {
+  if (schema.isFieldAllowedInScope(key, scope)) {
+    return undefined;
   }
-  return Boolean(def.disabled);
+  const allowedScopes = (def.scopes ?? schema.scopes).filter((s) => schema.scopes.includes(s));
+  if (allowedScopes.length === 1 && allowedScopes[0] === "global") {
+    return {
+      tag: "[Global only]",
+      reason: "Global-only setting. Switch Save scope to Global to edit.",
+    };
+  }
+  if (allowedScopes.length === 1 && allowedScopes[0] === "project") {
+    return {
+      tag: "[Project only]",
+      reason: trustedProject
+        ? "Project-only setting. Switch Save scope to Project to edit."
+        : "Project-only setting. This project is not trusted, so Project scope is locked.",
+    };
+  }
+  return {
+    tag: "[Unavailable]",
+    reason: `"${label}" cannot be configured in ${scope} scope.`,
+  };
 }
 
 function isFieldVisible<TValues extends Record<string, unknown>>(
@@ -140,12 +166,13 @@ function collectVisibleFields<TFields extends FieldMap>(
 
 async function editBooleanField(
   ctx: ExtensionContext,
+  label: string,
   def: BooleanFieldDef<any>,
   dialogOpts: ExtensionUIDialogOptions | undefined,
 ): Promise<boolean | undefined> {
   const trueLabel = def.trueLabel ?? "Enabled";
   const falseLabel = def.falseLabel ?? "Disabled";
-  const choice = await ctx.ui.select(def.label, [trueLabel, falseLabel], dialogOpts);
+  const choice = await ctx.ui.select(label, [trueLabel, falseLabel], dialogOpts);
   if (choice === undefined) {
     return undefined;
   }
@@ -154,6 +181,7 @@ async function editBooleanField(
 
 async function editEnumField(
   ctx: ExtensionContext,
+  label: string,
   def: EnumFieldDef<string, any>,
   dialogOpts: ExtensionUIDialogOptions | undefined,
 ): Promise<string | undefined> {
@@ -169,7 +197,7 @@ async function editEnumField(
     labels.push(display);
   }
 
-  const choice = await ctx.ui.select(def.label, labels, dialogOpts);
+  const choice = await ctx.ui.select(label, labels, dialogOpts);
   if (choice === undefined) {
     return undefined;
   }
@@ -179,7 +207,8 @@ async function editEnumField(
 async function editMultiSelectField<TFields extends FieldMap>(
   ctx: ExtensionContext,
   schema: SettingsSchema<TFields>,
-  key: keyof TFields & string,
+  key: PersistedFieldKeys<TFields>,
+  label: string,
   def: MultiSelectFieldDef<string, any>,
   currentValue: readonly string[],
   dialogOpts: ExtensionUIDialogOptions | undefined,
@@ -219,7 +248,7 @@ async function editMultiSelectField<TFields extends FieldMap>(
     items.push(doneLabel);
 
     const choice = await ctx.ui.select(
-      `${def.label} (${selected.size} selected)`,
+      `${label} (${selected.size} selected)`,
       items,
       dialogOpts,
     );
@@ -250,7 +279,7 @@ async function editMultiSelectField<TFields extends FieldMap>(
 
     if (def.allowCustom && choice === customAddLabel) {
       const customInput = await ctx.ui.input(
-        `${def.label}: enter custom value`,
+        `${label}: enter custom value`,
         undefined,
         dialogOpts,
       );
@@ -286,16 +315,17 @@ async function editMultiSelectField<TFields extends FieldMap>(
 async function editStringField<TFields extends FieldMap>(
   ctx: ExtensionContext,
   schema: SettingsSchema<TFields>,
-  key: keyof TFields & string,
+  key: PersistedFieldKeys<TFields>,
+  label: string,
   def: StringFieldDef<any>,
   currentValue: string,
   dialogOpts: ExtensionUIDialogOptions | undefined,
 ): Promise<string | undefined> {
   while (!ctx.signal?.aborted) {
     const raw = def.multiline
-      ? await ctx.ui.editor(def.label, currentValue)
+      ? await ctx.ui.editor(label, currentValue)
       : await ctx.ui.input(
-          def.label,
+          label,
           def.placeholder ?? (currentValue.length > 0 ? currentValue : undefined),
           dialogOpts,
         );
@@ -318,7 +348,8 @@ async function editStringField<TFields extends FieldMap>(
 async function editNumberField<TFields extends FieldMap>(
   ctx: ExtensionContext,
   schema: SettingsSchema<TFields>,
-  key: keyof TFields & string,
+  key: PersistedFieldKeys<TFields>,
+  label: string,
   def: NumberFieldDef<any>,
   currentValue: number,
   dialogOpts: ExtensionUIDialogOptions | undefined,
@@ -326,7 +357,7 @@ async function editNumberField<TFields extends FieldMap>(
   const unitSuffix = def.unit ? ` (${def.unit})` : "";
   while (!ctx.signal?.aborted) {
     const raw = await ctx.ui.input(
-      `${def.label}${unitSuffix} [current: ${currentValue}]`,
+      `${label}${unitSuffix} [current: ${currentValue}]`,
       def.placeholder ?? String(currentValue),
       dialogOpts,
     );
@@ -356,7 +387,8 @@ async function editNumberField<TFields extends FieldMap>(
 async function editModelField<TFields extends FieldMap>(
   ctx: ExtensionContext,
   schema: SettingsSchema<TFields>,
-  key: keyof TFields & string,
+  key: PersistedFieldKeys<TFields>,
+  label: string,
   def: ModelFieldDef<boolean, any, boolean>,
   currentValue: ModelSelection | string | null,
   dialogOpts: ExtensionUIDialogOptions | undefined,
@@ -542,7 +574,7 @@ async function editModelField<TFields extends FieldMap>(
 
     const stepPrefix = def.includeThinking === false ? "" : "Step 1/2: ";
     const choice = await ctx.ui.select(
-      `${def.label} — ${stepPrefix}Select model (${scope === "scoped" ? "Scoped" : "All"})`,
+      `${label} — ${stepPrefix}Select model (${scope === "scoped" ? "Scoped" : "All"})`,
       options,
       dialogOpts,
     );
@@ -599,15 +631,15 @@ async function editModelField<TFields extends FieldMap>(
           ? " (current)"
           : "";
       const scopedMark = picked.model.scopedThinkingLevel === level ? " · scoped" : "";
-      const label = `${level} — ${MODEL_THINKING_LEVEL_DESCRIPTIONS[level]}${scopedMark}${currentLevelMark}`;
-      levelLabelToValue.set(label, level);
-      levelOptions.push(label);
+      const levelLabel = `${level} — ${MODEL_THINKING_LEVEL_DESCRIPTIONS[level]}${scopedMark}${currentLevelMark}`;
+      levelLabelToValue.set(levelLabel, level);
+      levelOptions.push(levelLabel);
     }
     const backLabel = "← Back to models";
     levelOptions.push(backLabel);
 
     const levelChoice = await ctx.ui.select(
-      `${def.label} — Step 2/2: Thinking level for ${picked.model.identity}`,
+      `${label} — Step 2/2: Thinking level for ${picked.model.identity}`,
       levelOptions,
       dialogOpts,
     );
@@ -636,16 +668,189 @@ async function editModelField<TFields extends FieldMap>(
   return undefined;
 }
 
+async function editPickerField<TFields extends FieldMap>(
+  ctx: ExtensionContext,
+  schema: SettingsSchema<TFields>,
+  key: PersistedFieldKeys<TFields>,
+  label: string,
+  def: PickerFieldDef<unknown, any>,
+  currentValue: unknown,
+  draft: Readonly<InferSettingsValues<TFields>>,
+  scope: SettingsScope,
+  dialogOpts: ExtensionUIDialogOptions | undefined,
+): Promise<{ readonly selected: true; readonly value: unknown } | undefined> {
+  const isEqual = def.equals ?? deepEqual;
+  const clearVal = def.clearValue !== undefined ? def.clearValue : null;
+  const searchable = def.searchable !== false;
+  const refreshable = def.refreshable !== false;
+
+  const loadAll = async (): Promise<readonly DynamicPickerOption<unknown>[]> => {
+    const signal = ctx.signal ?? new AbortController().signal;
+    try {
+      return await def.loadOptions({ draft: cloneValue(draft), scope, signal });
+    } catch (err) {
+      if (!ctx.signal?.aborted) {
+        ctx.ui.notify(
+          `Failed to load options for "${label}": ${err instanceof Error ? err.message : String(err)}`,
+          "error",
+        );
+      }
+      return [];
+    }
+  };
+
+  let allOptions = await loadAll();
+  let query = "";
+
+  while (!ctx.signal?.aborted) {
+    const filtered = query
+      ? fuzzyFilter(
+          [...allOptions],
+          query,
+          (opt) => `${opt.label} ${opt.group ?? ""} ${opt.badge ?? ""} ${opt.description ?? ""} ${opt.id}`,
+        )
+      : [...allOptions];
+
+    const labelToAction = new Map<
+      string,
+      | { readonly kind: "filter" }
+      | { readonly kind: "clearFilter" }
+      | { readonly kind: "refresh" }
+      | { readonly kind: "clearValue" }
+      | { readonly kind: "option"; readonly option: DynamicPickerOption<unknown> }
+    >();
+    const options: string[] = [];
+
+    if (searchable) {
+      const filterLabel = query
+        ? `Filter: "${query}" — Change search`
+        : "Filter options by text...";
+      labelToAction.set(filterLabel, { kind: "filter" });
+      options.push(filterLabel);
+
+      if (query) {
+        const clearFilterLabel = "Clear search filter";
+        labelToAction.set(clearFilterLabel, { kind: "clearFilter" });
+        options.push(clearFilterLabel);
+      }
+    }
+
+    if (refreshable) {
+      const refreshLabel = "Refresh options";
+      labelToAction.set(refreshLabel, { kind: "refresh" });
+      options.push(refreshLabel);
+    }
+
+    if (def.allowClear) {
+      const clearValLabel = `${def.emptyLabel ?? "None"} — ${def.emptyDescription ?? "Clear selection"}`;
+      labelToAction.set(clearValLabel, { kind: "clearValue" });
+      options.push(clearValLabel);
+    }
+
+    for (const opt of filtered) {
+      const groupPrefix = opt.group ? `[${opt.group}] ` : "";
+      const badgeSuffix = opt.badge ? ` [${opt.badge}]` : "";
+      const descSuffix = opt.description ? ` — ${opt.description}` : "";
+      const currentBadge = isEqual(opt.value, currentValue) ? " (current)" : "";
+      const disabledBadge = opt.disabled || opt.disabledReason ? " [disabled]" : "";
+      let itemLabel = `${groupPrefix}${opt.label}${badgeSuffix}${descSuffix}${currentBadge}${disabledBadge}`;
+      if (labelToAction.has(itemLabel)) {
+        itemLabel = `${itemLabel} (${opt.id})`;
+      }
+      labelToAction.set(itemLabel, { kind: "option", option: opt });
+      options.push(itemLabel);
+    }
+
+    const choice = await ctx.ui.select(label, options, dialogOpts);
+    if (choice === undefined || ctx.signal?.aborted) {
+      return undefined;
+    }
+
+    const picked = labelToAction.get(choice);
+    if (!picked) continue;
+
+    if (picked.kind === "filter") {
+      const nextQuery = await ctx.ui.input("Filter options", query, dialogOpts);
+      if (nextQuery !== undefined) {
+        query = nextQuery.trim();
+      }
+      continue;
+    }
+
+    if (picked.kind === "clearFilter") {
+      query = "";
+      continue;
+    }
+
+    if (picked.kind === "refresh") {
+      allOptions = await loadAll();
+      continue;
+    }
+
+    if (picked.kind === "clearValue") {
+      const validation = schema.validateField(key, clearVal);
+      if (!validation.ok) {
+        ctx.ui.notify(validation.error, "warning");
+        continue;
+      }
+      return { selected: true, value: validation.value };
+    }
+
+    const opt = picked.option;
+    if (opt.disabled || opt.disabledReason) {
+      ctx.ui.notify(opt.disabledReason || "Option unavailable", "warning");
+      continue;
+    }
+
+    if (def.validateSelection) {
+      const signal = ctx.signal ?? new AbortController().signal;
+      try {
+        const outcome = await def.validateSelection(opt, {
+          draft: cloneValue(draft),
+          scope,
+          signal,
+        });
+        if (ctx.signal?.aborted) {
+          return undefined;
+        }
+        if (outcome !== true && outcome !== "") {
+          ctx.ui.notify(
+            typeof outcome === "string" ? outcome : "Selection is invalid.",
+            "warning",
+          );
+          continue;
+        }
+      } catch (err) {
+        if (ctx.signal?.aborted) {
+          return undefined;
+        }
+        ctx.ui.notify(err instanceof Error ? err.message : String(err), "warning");
+        continue;
+      }
+    }
+
+    const validation = schema.validateField(key, opt.value);
+    if (!validation.ok) {
+      ctx.ui.notify(validation.error, "warning");
+      continue;
+    }
+    return { selected: true, value: validation.value };
+  }
+
+  return undefined;
+}
+
 async function editCustomField<TFields extends FieldMap>(
   ctx: ExtensionContext,
   schema: SettingsSchema<TFields>,
-  key: keyof TFields & string,
+  key: PersistedFieldKeys<TFields>,
+  label: string,
   def: CustomFieldDef<unknown, any>,
   currentValue: unknown,
   draft: Readonly<InferSettingsValues<TFields>>,
 ): Promise<unknown | undefined> {
   if (typeof def.rpcEdit !== "function") {
-    ctx.ui.notify(`"${def.label}" requires interactive TUI mode to edit.`, "info");
+    ctx.ui.notify(`"${label}" requires interactive TUI mode to edit.`, "info");
     return undefined;
   }
 
@@ -737,17 +942,65 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
     for (const entry of visibleFields) {
       const { key, def, tabLabel } = entry;
       const prefix = tabLabel ? `[${tabLabel}] ` : "";
-      const formatted = schema.formatFieldValue(
+      const fieldLabel = schema.getFieldLabel(key, draft);
+      const hardDisabled = schema.isFieldHardDisabled(key, draft);
+      const eligibility = schema.getFieldEligibility(key, draft);
+      const scopeInfo = getScopeRestrictionInfo(
+        schema,
         key,
-        draft[key] as InferSettingsValues<TFields>[typeof key],
-        draft,
+        def,
+        scope,
+        currentLoaded.trustedProject,
+        fieldLabel,
       );
-      const provenance = formatProvenanceBadge(currentLoaded.provenance[key] ?? "default");
-      const modifiedMark = saveMode === "draft" && !deepEqual(draft[key], currentLoaded.effective[key])
-        ? " *"
-        : "";
-      const disabledMark = isFieldDisabled(def, draft) ? " [disabled]" : "";
-      let itemText = `${prefix}${def.label}: ${formatted} ${provenance}${modifiedMark}${disabledMark}`;
+      const statusMark = hardDisabled
+        ? " [disabled]"
+        : scopeInfo
+          ? ` ${scopeInfo.tag}`
+          : !eligibility.eligible
+            ? " [unavailable]"
+            : "";
+
+      let itemText: string;
+      if (isPersistedFieldDef(def)) {
+        const persistedKey = key as PersistedFieldKeys<TFields>;
+        const formatted = schema.formatFieldValue(
+          persistedKey,
+          draft[persistedKey] as never,
+          draft,
+        );
+        const provenance = formatProvenanceBadge(
+          currentLoaded.provenance[persistedKey] ?? "default",
+        );
+        const isEqual = def.kind === "picker" && def.equals ? def.equals : deepEqual;
+        const modifiedMark =
+          saveMode === "draft" && !isEqual(draft[persistedKey], currentLoaded.effective[persistedKey])
+            ? " *"
+            : "";
+        itemText = `${prefix}${fieldLabel}: ${formatted} ${provenance}${modifiedMark}${statusMark}`;
+      } else if (def.kind === "view") {
+        const rawFormatted = schema.formatFieldValue(key, undefined as never, draft);
+        const formatted = def.value !== undefined ? rawFormatted : "View";
+        itemText = `${prefix}${fieldLabel}: ${formatted}${statusMark}`;
+      } else {
+        let formatted: string;
+        if (typeof def.summary === "function") {
+          try {
+            const summaryRes = await def.summary({
+              draft: cloneValue(draft),
+              scope,
+              signal: ctx.signal ?? new AbortController().signal,
+            });
+            formatted = typeof summaryRes === "string" ? summaryRes : summaryRes.text;
+          } catch {
+            formatted = "Open";
+          }
+        } else {
+          formatted = def.summary ?? "Open";
+        }
+        itemText = `${prefix}${fieldLabel}: ${formatted}${statusMark}`;
+      }
+
       if (itemToAction.has(itemText)) {
         itemText = `${itemText} (${key})`;
       }
@@ -957,82 +1210,234 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
 
     if (action.kind === "field") {
       const { key, def } = action;
-      if (isFieldDisabled(def, draft)) {
-        ctx.ui.notify(`"${def.label}" is currently disabled.`, "info");
+      const fieldLabel = schema.getFieldLabel(key, draft);
+      if (schema.isFieldHardDisabled(key, draft)) {
+        ctx.ui.notify(`"${fieldLabel}" is currently disabled.`, "info");
         continue;
       }
-      if (def.scopes && !def.scopes.includes(scope)) {
+      const scopeInfo = getScopeRestrictionInfo(
+        schema,
+        key,
+        def,
+        scope,
+        currentLoaded.trustedProject,
+        fieldLabel,
+      );
+      if (scopeInfo) {
+        ctx.ui.notify(scopeInfo.reason, "warning");
+        continue;
+      }
+      const eligibility = schema.getFieldEligibility(key, draft);
+      if (!eligibility.eligible) {
         ctx.ui.notify(
-          `"${def.label}" cannot be configured in ${scope} scope.`,
+          eligibility.reason ?? `"${fieldLabel}" is currently unavailable.`,
           "warning",
         );
         continue;
       }
 
-      const currentValue = draft[key];
+      if (def.kind === "view") {
+        const signal = ctx.signal ?? new AbortController().signal;
+        try {
+          const rawText =
+            typeof def.content === "function"
+              ? await def.content({ draft: cloneValue(draft), scope, signal })
+              : def.content;
+          if (!ctx.signal?.aborted) {
+            const clean = stripControlChars(String(rawText ?? ""), true);
+            ctx.ui.notify(clean.length > 0 ? clean : `${fieldLabel}: (empty)`, "info");
+          }
+        } catch (err) {
+          if (!ctx.signal?.aborted) {
+            ctx.ui.notify(
+              `Failed to load "${fieldLabel}": ${err instanceof Error ? err.message : String(err)}`,
+              "error",
+            );
+          }
+        }
+        continue;
+      }
+
+      if (def.kind === "external") {
+        if (typeof def.rpcRun === "function") {
+          try {
+            await def.rpcRun(ctx, cloneValue(draft), scope);
+          } catch (err) {
+            if (!ctx.signal?.aborted) {
+              ctx.ui.notify(
+                `Failed to run "${fieldLabel}": ${err instanceof Error ? err.message : String(err)}`,
+                "error",
+              );
+            }
+          }
+        } else {
+          ctx.ui.notify(`${fieldLabel} requires interactive TUI mode.`, "info");
+        }
+        continue;
+      }
+
+      const persistedKey = key as PersistedFieldKeys<TFields>;
+      const currentValue = draft[persistedKey];
+      let hasNextValue = false;
       let nextValue: unknown = undefined;
 
       switch (def.kind) {
-        case "boolean":
-          nextValue = await editBooleanField(ctx, def, dialogOpts);
+        case "boolean": {
+          const edited = await editBooleanField(ctx, fieldLabel, def, dialogOpts);
+          if (edited !== undefined) {
+            hasNextValue = true;
+            nextValue = edited;
+          }
           break;
-        case "enum":
-          nextValue = await editEnumField(ctx, def, dialogOpts);
+        }
+        case "enum": {
+          const edited = await editEnumField(ctx, fieldLabel, def, dialogOpts);
+          if (edited !== undefined) {
+            hasNextValue = true;
+            nextValue = edited;
+          }
           break;
-        case "multiSelect":
-          nextValue = await editMultiSelectField(
+        }
+        case "multiSelect": {
+          const edited = await editMultiSelectField(
             ctx,
             schema,
-            key,
+            persistedKey,
+            fieldLabel,
             def,
             Array.isArray(currentValue) ? (currentValue as string[]) : [],
             dialogOpts,
           );
+          if (edited !== undefined) {
+            hasNextValue = true;
+            nextValue = edited;
+          }
           break;
-        case "string":
-          nextValue = await editStringField(
+        }
+        case "string": {
+          const edited = await editStringField(
             ctx,
             schema,
-            key,
+            persistedKey,
+            fieldLabel,
             def,
             typeof currentValue === "string" ? currentValue : String(currentValue ?? ""),
             dialogOpts,
           );
+          if (edited !== undefined) {
+            hasNextValue = true;
+            nextValue = edited;
+          }
           break;
-        case "number":
-          nextValue = await editNumberField(
+        }
+        case "number": {
+          const edited = await editNumberField(
             ctx,
             schema,
-            key,
+            persistedKey,
+            fieldLabel,
             def,
             typeof currentValue === "number" ? currentValue : Number(currentValue ?? 0),
             dialogOpts,
           );
+          if (edited !== undefined) {
+            hasNextValue = true;
+            nextValue = edited;
+          }
           break;
-        case "model":
-          nextValue = await editModelField(
+        }
+        case "model": {
+          const edited = await editModelField(
             ctx,
             schema,
-            key,
+            persistedKey,
+            fieldLabel,
             def,
             (currentValue as ModelSelection | string | null) ?? null,
             dialogOpts,
             options,
           );
+          if (edited !== undefined) {
+            hasNextValue = true;
+            nextValue = edited;
+          }
           break;
-        case "custom":
-          nextValue = await editCustomField(ctx, schema, key, def, currentValue, draft);
+        }
+        case "picker": {
+          const edited = await editPickerField(
+            ctx,
+            schema,
+            persistedKey,
+            fieldLabel,
+            def,
+            currentValue,
+            draft,
+            scope,
+            dialogOpts,
+          );
+          if (edited?.selected) {
+            hasNextValue = true;
+            nextValue = edited.value;
+          }
           break;
+        }
+        case "custom": {
+          const edited = await editCustomField(
+            ctx,
+            schema,
+            persistedKey,
+            fieldLabel,
+            def,
+            currentValue,
+            draft,
+          );
+          if (edited !== undefined) {
+            hasNextValue = true;
+            nextValue = edited;
+          }
+          break;
+        }
       }
 
-      if (nextValue === undefined || deepEqual(nextValue, currentValue)) {
+      const isEqual = def.kind === "picker" && def.equals ? def.equals : deepEqual;
+      if (!hasNextValue || isEqual(nextValue, currentValue)) {
         continue;
       }
 
-      const nextDraft = {
-        ...draft,
-        [key]: nextValue,
+      const prevDraft = draft;
+      let nextDraft = {
+        ...prevDraft,
+        [persistedKey]: nextValue,
       } as InferSettingsValues<TFields>;
+
+      if (schema.normalizeDraft) {
+        try {
+          const normalized = schema.normalizeDraft(
+            cloneValue(nextDraft),
+            persistedKey,
+            cloneValue(prevDraft),
+          );
+          let validationError: string | undefined;
+          for (const k of schema.persistedFieldKeys) {
+            if (!deepEqual(normalized[k], nextDraft[k])) {
+              const recheck = schema.validateField(k, normalized[k]);
+              if (!recheck.ok) {
+                validationError = `${schema.getFieldLabel(k, normalized)}: ${recheck.error}`;
+                break;
+              }
+              normalized[k] = recheck.value;
+            }
+          }
+          if (validationError) {
+            ctx.ui.notify(validationError, "warning");
+            continue;
+          }
+          nextDraft = normalized;
+        } catch (err) {
+          ctx.ui.notify(err instanceof Error ? err.message : String(err), "warning");
+          continue;
+        }
+      }
 
       if (saveMode === "immediate") {
         await persistValues(nextDraft);

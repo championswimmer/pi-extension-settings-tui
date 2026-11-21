@@ -215,12 +215,17 @@ export const demoSchema = defineSettings({
     }),
     threshold: field.number({
       tab: "advanced",
-      label: "Confidence threshold",
+      label: (values) =>
+        values.mode === "strict" ? "Strict threshold" : "Confidence threshold",
       description: "Floating-point score threshold between 0 and 1.",
       default: 0.75,
       min: 0,
       max: 1,
       step: 0.05,
+      eligible: (values) =>
+        values.enabled
+          ? true
+          : { eligible: false, reason: "Enable the extension on the General tab first." },
     }),
     maxConcurrent: field.integer({
       tab: "advanced",
@@ -231,6 +236,21 @@ export const demoSchema = defineSettings({
       max: 64,
       step: 1,
       unit: "workers",
+    }),
+    statusSummary: field.view({
+      tab: "advanced",
+      label: "Configuration summary",
+      description: "Read-only Markdown preview of the current draft settings.",
+      value: "View…",
+      format: "markdown",
+      content: ({ draft, scope }) =>
+        [
+          `# Demo Settings (${scope})`,
+          "",
+          `- **Enabled:** \`${String(draft.enabled)}\``,
+          `- **Mode:** \`${String(draft.mode)}\` · **Region:** \`${String(draft.region)}\``,
+          `- **Threshold:** \`${String(draft.threshold)}\` · **Max concurrent:** \`${String(draft.maxConcurrent)}\``,
+        ].join("\n"),
     }),
     customNote: field.custom<string>({
       tab: "advanced",

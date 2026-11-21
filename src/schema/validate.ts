@@ -6,9 +6,15 @@ import {
   type ModelPickerEntry,
   type ModelThinkingLevel,
   type PartialValidationResult,
+  type PersistedFieldDef,
   type ValidationResult,
   type ValidationWarning,
 } from "./types.js";
+
+/** Returns `true` when `def` is a persisted setting field (excludes `"view"` and `"external"`). */
+export function isPersistedFieldDef(def: AnyFieldDef): def is PersistedFieldDef {
+  return def.kind !== "view" && def.kind !== "external";
+}
 
 export const SECRET_KEY_PATTERN = /api.?key|token|secret|password|authorization|credential/i;
 
@@ -444,6 +450,7 @@ export function validateFieldValue(fieldDef: AnyFieldDef, raw: unknown): Validat
       };
     }
 
+    case "picker":
     case "custom": {
       if (fieldDef.validate) {
         try {
@@ -466,6 +473,14 @@ export function validateFieldValue(fieldDef: AnyFieldDef, raw: unknown): Validat
       }
 
       return { ok: true, value: cloneValue(raw) };
+    }
+
+    case "view":
+    case "external": {
+      return {
+        ok: false,
+        error: `Field of kind "${fieldDef.kind}" is not persisted and cannot be validated`,
+      };
     }
   }
 }
@@ -498,6 +513,15 @@ export function validatePartialSettings<TFields extends FieldMap>(
     }
 
     const fieldDef = fields[key]!;
+    if (!isPersistedFieldDef(fieldDef)) {
+      warnings.push({
+        key,
+        message: `Non-persisted field "${key}" (kind "${fieldDef.kind}") cannot be loaded from settings`,
+      });
+      rejectedKeys.push(key);
+      continue;
+    }
+
     const result = validateFieldValue(fieldDef, raw[key]);
     if (result.ok) {
       values[key] = result.value;
