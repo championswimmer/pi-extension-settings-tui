@@ -4,44 +4,50 @@ All notable changes to `pi-extension-settings-tui` are documented here.
 Entries are generated from git history by [git-cliff](https://git-cliff.org) on every release.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### ⚙️ Miscellaneous Tasks
+
+- Add git-cliff changelog management and move skills to .agents/skills ([95ef792](https://github.com/championswimmer/pi-extension-settings-tui/commit/95ef79228970a7f1bf13c1bf320111deea5041a8))
+
 ## [0.5.1](https://github.com/championswimmer/pi-extension-settings-tui/compare/v0.5.0...v0.5.1) - 2026-11-21
 
-### CI
+### ⚙️ Miscellaneous Tasks
 
 - Add tag-triggered npm release workflow and /release skill ([b1a1934](https://github.com/championswimmer/pi-extension-settings-tui/commit/b1a1934e543eecece4158e0f69caaadf592916ad))
 
 ## [0.5.0](https://github.com/championswimmer/pi-extension-settings-tui/compare/v0.4.0...v0.5.0) - 2026-11-21
 
-### Features
+### 🚀 Features
 
 - Add scope-aware UI, row eligibility, dynamic labels, and view/external/picker fields ([ad2d180](https://github.com/championswimmer/pi-extension-settings-tui/commit/ad2d18070318df6317209bce4c75432cf0daa1bf))
 
 ## [0.4.0](https://github.com/championswimmer/pi-extension-settings-tui/compare/v0.3.0...v0.4.0) - 2026-11-21
 
-### Features
+### 🚀 Features
 
 - Add dynamic field metadata, model-only picker mode, and migration persistence ([4f92f4c](https://github.com/championswimmer/pi-extension-settings-tui/commit/4f92f4c2c98e50a9ce5f7fb21ba0675f2a46f1fa))
 
 ## [0.3.0](https://github.com/championswimmer/pi-extension-settings-tui/compare/v0.2.0...v0.3.0) - 2026-11-21
 
-### Features
+### 🚀 Features
 
 - Add first-class model picker widget (field.model and ModelPickerRoute) ([b324690](https://github.com/championswimmer/pi-extension-settings-tui/commit/b324690e42fa893159cfb1a047cf4eb822fbd64b))
 
 ## [0.2.0](https://github.com/championswimmer/pi-extension-settings-tui/compare/v0.1.0...v0.2.0) - 2026-11-21
 
-### Features
+### 🚀 Features
 
 - Add first-class settingsFile mirroring and polish draft/immediate save modes ([287a7c2](https://github.com/championswimmer/pi-extension-settings-tui/commit/287a7c2cca8980bbd9a81df8b385ad29b4997098))
 
-### Documentation
+### 📚 Documentation
 
 - Polish human-oriented README and add AGENTS.md ([7991659](https://github.com/championswimmer/pi-extension-settings-tui/commit/79916596f19963ef19582faee33eeb480bead6ad))
 - Add docs/ guides, Charm freeze demo recordings, and concise README with npm badges ([6806489](https://github.com/championswimmer/pi-extension-settings-tui/commit/6806489165741a39265e8a6c0bd2f8fdaac70f50))
 
 ## [0.1.0](https://github.com/championswimmer/pi-extension-settings-tui/releases/tag/v0.1.0) - 2026-11-21
 
-### Features
+### 🚀 Features
 
 - Initial release of pi-extension-settings-tui (v0.1.0) ([4a82236](https://github.com/championswimmer/pi-extension-settings-tui/commit/4a8223695d32b29de4ebd3a1f769f8c1626cb18c))
 

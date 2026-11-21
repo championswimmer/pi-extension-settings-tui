@@ -66,17 +66,23 @@ commit_preprocessors = [
   # Squash-merge subjects end in "(#123)"; drop it (PR is linked separately).
   { pattern = '\s*\(#([0-9]+)\)\s*$', replace = "" },
 ]
+# git-cliff default groups (from `git cliff --init`), plus a skip for this repo's
+# `chore(release): vX.Y.Z` bump commits.
 commit_parsers = [
   { message = "^chore\\(release\\)", skip = true },
   { message = "^Merge pull request", skip = true },
-  { message = "^feat", group = "<!-- 0 -->Features" },
-  { message = "^fix", group = "<!-- 1 -->Bug Fixes" },
-  { message = "^perf", group = "<!-- 2 -->Performance" },
-  { message = "^refactor", group = "<!-- 3 -->Refactoring" },
-  { message = "^docs", group = "<!-- 4 -->Documentation" },
-  { message = "^test", group = "<!-- 5 -->Tests" },
-  { message = "^build", group = "<!-- 6 -->Build" },
-  { message = "^ci", group = "<!-- 7 -->CI" },
-  { message = "^chore", group = "<!-- 8 -->Chores" },
-  { message = ".*", group = "<!-- 9 -->Other Changes" },
+  { message = "^feat", group = "<!-- 0 -->🚀 Features" },
+  { message = "^fix", group = "<!-- 1 -->🐛 Bug Fixes" },
+  { message = "^doc", group = "<!-- 3 -->📚 Documentation" },
+  { message = "^perf", group = "<!-- 4 -->⚡ Performance" },
+  { message = "^refactor", group = "<!-- 2 -->🚜 Refactor" },
+  { message = "^style", group = "<!-- 5 -->🎨 Styling" },
+  { message = "^test", group = "<!-- 6 -->🧪 Testing" },
+  { message = "^chore\\(deps.*\\)", skip = true },
+  { message = "^chore\\(pr\\)", skip = true },
+  { message = "^chore\\(pull\\)", skip = true },
+  { message = "^chore|^ci", group = "<!-- 7 -->⚙️ Miscellaneous Tasks" },
+  { body = ".*security", group = "<!-- 8 -->🛡️ Security" },
+  { message = "^revert", group = "<!-- 9 -->◀️ Revert" },
+  { message = ".*", group = "<!-- 10 -->💼 Other" },
 ]
