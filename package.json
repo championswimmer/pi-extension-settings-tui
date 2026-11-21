@@ -1,6 +1,6 @@
 {
   "name": "pi-extension-settings-tui",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Declarative, mouse-capable TUI settings dialog and hardened layered JSON persistence library for Pi extensions over @earendil-works/pi-tui.",
   "type": "module",
   "author": "Arnav Gupta",

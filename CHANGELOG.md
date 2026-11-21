@@ -4,11 +4,13 @@ All notable changes to `pi-extension-settings-tui` are documented here.
 Entries are generated from git history by [git-cliff](https://git-cliff.org) on every release.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.6.0](https://github.com/championswimmer/pi-extension-settings-tui/compare/v0.5.1...v0.6.0) - 2026-11-21
 
 ### ⚙️ Miscellaneous Tasks
 
 - Add git-cliff changelog management and move skills to .agents/skills ([95ef792](https://github.com/championswimmer/pi-extension-settings-tui/commit/95ef79228970a7f1bf13c1bf320111deea5041a8))
+- **hooks:** Enforce conventional commit types and add git-commit skill ([3febc5d](https://github.com/championswimmer/pi-extension-settings-tui/commit/3febc5d5d7e518931367c604efa2a09dbcc32aa5))
+- Switch changelog to git-cliff default groups ([159210f](https://github.com/championswimmer/pi-extension-settings-tui/commit/159210f7ee0ad75610aa3c817a313934c5a67cc6))
 
 ## [0.5.1](https://github.com/championswimmer/pi-extension-settings-tui/compare/v0.5.0...v0.5.1) - 2026-11-21
 
