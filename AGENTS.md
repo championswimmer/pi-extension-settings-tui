@@ -28,8 +28,14 @@ adapter  ──▶  dialog  ──▶  store  ──▶  schema
 pi-extension-settings-tui/
 ├── package.json                       # ESM package manifest, subpath exports, peerDeps, scripts
 ├── tsconfig.json                      # strict, NodeNext, verbatimModuleSyntax, emits dist/
-├── README.md                          # Human-facing documentation & quickstart
+├── README.md                          # Concise human-facing overview, preview & quickstart
 ├── AGENTS.md                          # This file
+├── docs/
+│   ├── getting-started.md             # Full walkthrough, startup loading & demo setup
+│   ├── field-types.md                 # Declarative fields & custom sub-route reference
+│   ├── storage-and-security.md        # Layered scopes, custom paths, session adapter & hardening
+│   ├── tui-mouse-and-rpc.md           # TUI shortcuts, fullscreen mouse, RPC/headless & subpaths
+│   └── assets/                        # Demo GIF and static screenshots for README/docs
 ├── src/
 │   ├── index.ts
 │   ├── schema/
