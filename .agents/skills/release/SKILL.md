@@ -1,6 +1,6 @@
 ---
 name: release
-description: Cut a new npm release of pi-extension-settings-tui by bumping the version (major, minor, or patch), committing, tagging vX.Y.Z, and pushing to GitHub so .github/workflows/release.yml publishes it via npm Trusted Publishing. Use when the user runs /release major, /release minor, /release patch (optionally with --watch or "watch"), or asks to cut/ship/publish a release.
+description: Cut a new npm release of pi-extension-settings-tui by bumping the version (major, minor, or patch), regenerating CHANGELOG.md with git-cliff, committing, tagging vX.Y.Z, and pushing to GitHub so .github/workflows/release.yml publishes it via npm Trusted Publishing. Use when the user runs /release major, /release minor, /release patch (optionally with --watch or "watch"), or asks to cut/ship/publish a release.
 ---
 
 # /release
@@ -45,12 +45,26 @@ VERSION=$(node -p "require('./package.json').version")
 
 Make sure the tag `v$VERSION` does not already exist locally or on origin (`git rev-parse -q --verify "refs/tags/v$VERSION"`, `git ls-remote --tags origin "v$VERSION"`). If it does, stop.
 
+### 3b. Regenerate CHANGELOG.md (git-cliff, config in `cliff.toml`)
+
+Always regenerate the **whole** file. Never use `--prepend`/`--unreleased` and never hand-edit `CHANGELOG.md`. Full regeneration rebuilds every `vX.Y.Z` tag from git history, so a release that was tagged without updating the changelog is backfilled here automatically.
+
+```bash
+GITHUB_TOKEN=$(gh auth token 2>/dev/null) npx git-cliff --tag "v$VERSION" -o CHANGELOG.md
+grep -n "^## \[$VERSION\]" CHANGELOG.md   # must match
+git diff --stat CHANGELOG.md
+```
+
+- `--tag` labels the not-yet-tagged commits as `v$VERSION`. Each section lists every commit since the previous tag (minus `chore(release)` bumps), grouped by Conventional Commit type, with PR links when commits came from PRs.
+- `GITHUB_TOKEN` is optional. With it, git-cliff resolves PR numbers and titles through the GitHub API; without it, commits are still listed.
+- Show the user the new `## [$VERSION]` section. If older sections changed too, a previous release was missing an entry; say so.
+
 ### 4. Commit and tag
 
 Follow the existing convention (`chore(release): vX.Y.Z`, annotated tag):
 
 ```bash
-git add package.json package-lock.json
+git add package.json package-lock.json CHANGELOG.md
 git commit -m "chore(release): v$VERSION" -m "Co-Authored-By: Claude <noreply@anthropic.com>"
 git tag -a "v$VERSION" -m "v$VERSION"
 ```

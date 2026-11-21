@@ -25,6 +25,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags for git-cliff
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -51,6 +53,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check CHANGELOG.md has an entry for this release
+        # Warning only: CHANGELOG.md is fully regenerated from git history on every
+        # release, so a forgotten entry is backfilled by the next release.
+        run: |
+          if ! grep -q "^## \[${GITHUB_REF_NAME#v}\]" CHANGELOG.md; then
+            echo "::warning::CHANGELOG.md has no section for ${GITHUB_REF_NAME#v}; it will be backfilled on the next release (npm run changelog)."
+          fi
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -73,10 +83,12 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }} # lets git-cliff resolve PR numbers/titles
         run: |
+          npx git-cliff --current --strip all > "$RUNNER_TEMP/release-notes.md"
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then PRERELEASE="--prerelease"; else PRERELEASE=""; fi
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
             --verify-tag \
             $PRERELEASE
