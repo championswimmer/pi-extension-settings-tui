@@ -12,7 +12,7 @@ description: Commit message rules for pi-extension-settings-tui. Every commit su
 
 [optional body: why, not what]
 
-[optional trailers, e.g. Co-Authored-By]
+[optional trailers — never Co-Authored-By: Claude or any AI attribution]
 ```
 
 - **type**: exactly one of the [Conventional Commits](https://www.conventionalcommits.org/) / Angular types below (lowercase).

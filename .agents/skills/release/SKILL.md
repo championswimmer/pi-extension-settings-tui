@@ -65,11 +65,11 @@ Follow the existing convention (`chore(release): vX.Y.Z`, annotated tag):
 
 ```bash
 git add package.json package-lock.json CHANGELOG.md
-git commit -m "chore(release): v$VERSION" -m "Co-Authored-By: Claude <noreply@anthropic.com>"
+git commit -m "chore(release): v$VERSION"
 git tag -a "v$VERSION" -m "v$VERSION"
 ```
 
-(Use the commit attribution trailer given in the current session's instructions, if any, instead of the generic one above.)
+(Never add `Co-Authored-By` trailers or any Claude/AI attribution to commits, tags or PRs.)
 
 ### 5. Push
 
