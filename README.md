@@ -28,6 +28,21 @@ Supports fullscreen mouse clicks and wheel scrolling across tabs, searchable pic
 
 </details>
 
+<details>
+<summary>Widget recordings (model picker, enum, multi-select, dynamic picker, text &amp; number, viewer)</summary>
+
+| `field.model` | `field.enum` |
+| :---: | :---: |
+| ![Model picker demo](https://raw.githubusercontent.com/championswimmer/pi-extension-settings-tui/main/docs/assets/widget-model-picker.gif) | ![Enum picker demo](https://raw.githubusercontent.com/championswimmer/pi-extension-settings-tui/main/docs/assets/widget-enum-picker.gif) |
+| **`field.multiSelect`** | **`field.picker`** |
+| ![Multi-select demo](https://raw.githubusercontent.com/championswimmer/pi-extension-settings-tui/main/docs/assets/widget-multi-select.gif) | ![Dynamic picker demo](https://raw.githubusercontent.com/championswimmer/pi-extension-settings-tui/main/docs/assets/widget-dynamic-picker.gif) |
+| **`field.string` / `field.number`** | **`field.view`** |
+| ![Text and number input demo](https://raw.githubusercontent.com/championswimmer/pi-extension-settings-tui/main/docs/assets/widget-text-number.gif) | ![Markdown viewer demo](https://raw.githubusercontent.com/championswimmer/pi-extension-settings-tui/main/docs/assets/widget-text-viewer.gif) |
+
+See [Field Types](docs/field-types.md) for each widget's options alongside its recording.
+
+</details>
+
 ## Install
 
 ```bash

@@ -42,7 +42,7 @@ pi-extension-settings-tui/
 │   ├── field-types.md                 # Declarative fields & custom sub-route reference
 │   ├── storage-and-security.md        # Layered scopes, custom paths, session adapter & hardening
 │   ├── tui-mouse-and-rpc.md           # TUI shortcuts, fullscreen mouse, RPC/headless & subpaths
-│   └── assets/                        # Demo GIF and static screenshots for README/docs
+│   └── assets/                        # Demo GIFs (incl. per-widget widget-*.gif) and screenshots for README/docs
 ├── src/
 │   ├── index.ts
 │   ├── schema/

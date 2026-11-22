@@ -117,6 +117,10 @@ const enabled = field.boolean({
 
 ## 2. `field.enum`
 
+![field.enum: inline cycling, ← / → stepping, and the searchable picker](assets/widget-enum-picker.gif)
+
+*A 3-option enum cycles inline with `Enter` and `←`/`→`; the 7-option enum opens the searchable `SelectRoute`. A `field.boolean` toggle is shown first.*
+
 - **TypeScript type:** Exact literal union `T` (e.g. `"off" | "balanced" | "strict"`).
 - **TUI interaction:** Depends on `display`:
   - `"auto"` *(default)*: Cycles inline on `Enter`/`Space` when `options.length <= 3`; opens a searchable `SelectRoute` picker when `options.length > 3`.
@@ -149,6 +153,10 @@ const logLevel = field.enum({
 ---
 
 ## 3. `field.multiSelect`
+
+![field.multiSelect: grouped checklist with filtering and custom values](assets/widget-multi-select.gif)
+
+*Toggling grouped items, filtering, and adding a custom value with `allowCustom: true`.*
 
 - **TypeScript type:** `T[]` (deduplicated array of strings).
 - **TUI interaction:** Opens `MultiSelectRoute`, a searchable `[x]`/`[ ]` checklist with optional collapsible groups (`[-]`/`[+]`), `Space` toggle, `Ctrl+A` toggle all visible items, and inline custom-value creation when `allowCustom: true`.
@@ -190,6 +198,10 @@ const plugins = field.multiSelect({
 ---
 
 ## 4. `field.string`
+
+![field.string and field.number: live validation and inline stepping](assets/widget-text-number.gif)
+
+*A single-line `field.string` with live `pattern` validation, then a `field.integer` and a `field.number` stepped inline with `←`/`→`, plus an out-of-range value rejected in `TextInputRoute`.*
 
 - **TypeScript type:** `string`
 - **TUI interaction:** Opens `TextInputRoute`:
@@ -237,6 +249,8 @@ const systemNotes = field.string({
 
 ## 5. `field.number` & `field.integer`
 
+> See the [`field.string` recording](#4-fieldstring) above; its second half covers inline number stepping and range validation.
+
 - **TypeScript type:** `number`
 - **TUI interaction:**
   - Press `←` / `→` directly on the row to step inline by `step` (defaults to `1`).
@@ -280,6 +294,10 @@ const workers = field.integer({
 ---
 
 ## 6. `field.model`
+
+![field.model: Scoped/All model search, then a thinking level](assets/widget-model-picker.gif)
+
+*Two-step selection (Scoped/All toggle with `Tab`, fuzzy search, thinking level), followed by the one-step `includeThinking: false` variant.*
 
 First-class Pi model picker, supporting both two-step model + thinking level selection (`includeThinking: true`, default) and one-step model-only selection (`includeThinking: false`).
 
@@ -340,6 +358,10 @@ const schema = defineSettings({
 
 ## 7. `field.picker<T>`
 
+![field.picker: async options, groups, badges, disabled reasons, validateSelection](assets/widget-dynamic-picker.gif)
+
+*Async `loadOptions` with groups and badges. A disabled option shows its `disabledReason`, and `validateSelection` rejects `legacy-vm` inline before `staging` is committed.*
+
 Searchable single-select sub-route (`DynamicPickerRoute`) backed by a sync or async option loader, optional groups, badges, disabled-reason feedback, clear-to-empty support, and async selection validation.
 
 - **TypeScript type:** `T`
@@ -376,6 +398,10 @@ const profile = field.picker<string | null>({
 ---
 
 ## 8. `field.view`
+
+![field.view: scrollable Markdown report with async refresh](assets/widget-text-viewer.gif)
+
+*An async Markdown report scrolled with `↑`/`↓` and `Home`/`End`, then re-loaded with `Ctrl+R`.*
 
 Non-persisted read-only viewer (`TextViewerRoute`) for displaying static or async-loaded Markdown or plain text (e.g., diagnostics, documentation, or generated status summaries). Never written to storage.
 
