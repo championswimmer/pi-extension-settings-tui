@@ -160,6 +160,8 @@ export async function openSettingsDialog<TFields extends FieldMap>(
             initialField: options.initialField,
             saveMode: options.saveMode,
             preferredWidth: options.preferredWidth,
+            maxHeight: overlayOptions.maxHeight,
+            renderPreview: options.renderPreview,
             availableModels,
             scopedModels,
             onApply: wrappedOnApply,

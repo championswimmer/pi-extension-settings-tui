@@ -226,8 +226,13 @@ test("TUI mode mounts single overlay, passes keybindings, never calls hideOverla
         });
 
         // Render, toggle first boolean field ("enabled" -> false), then Ctrl+S to save
-        component.render(80);
+        const lines = component.render(80);
+        assert.ok(lines.some((line) => line.includes("Preview: enabled")));
+        assert.ok(lines.length <= 18, "preview fits the configured 60% overlay height");
+        assert.match(lines.at(-2), /\[Ctrl\+S Save\]/);
+        assert.ok(lines.at(-1).startsWith("╰"));
         component.handleInput("\r"); // toggle enabled from true -> false
+        assert.ok(component.render(80).some((line) => line.includes("Preview: disabled")));
         component.handleInput("\u0013"); // Ctrl+S -> save
 
         const result = await donePromise;
@@ -241,7 +246,8 @@ test("TUI mode mounts single overlay, passes keybindings, never calls hideOverla
     schema,
     adapter,
     preferredWidth: 78,
-    overlayOptions: { offsetY: 1 },
+    overlayOptions: { offsetY: 1, maxHeight: "60%" },
+    renderPreview: ({ values, maxRows }) => Array(maxRows + 1).fill(`Preview: ${values.enabled ? "enabled" : "disabled"}`),
     onApply: (next, meta) => {
       applied.push({ next, meta });
     },
@@ -253,7 +259,7 @@ test("TUI mode mounts single overlay, passes keybindings, never calls hideOverla
   assert.equal(capturedOverlayOpts.overlayOptions.anchor, "center");
   assert.equal(capturedOverlayOpts.overlayOptions.width, 78);
   assert.equal(capturedOverlayOpts.overlayOptions.minWidth, 44);
-  assert.equal(capturedOverlayOpts.overlayOptions.maxHeight, "90%");
+  assert.equal(capturedOverlayOpts.overlayOptions.maxHeight, "60%");
   assert.equal(capturedOverlayOpts.overlayOptions.offsetY, 1);
 
   assert.equal(result.mode, "tui");
@@ -465,6 +471,7 @@ test("RPC fallback edits all field kinds, validates retries, switches scope, res
   const schema = createTestSchema("rpc-draft-test");
   const adapter = createMemoryStorageAdapter();
   const applied = [];
+  let previewCalls = 0;
 
   // Scripted user choices matched by prompt title / options
   const selectQueue = [
@@ -536,6 +543,10 @@ test("RPC fallback edits all field kinds, validates retries, switches scope, res
   const result = await openSettingsDialog(ctx, {
     schema,
     adapter,
+    renderPreview: () => {
+      previewCalls++;
+      return ["Inline preview"];
+    },
     onApply: (next, meta) => {
       applied.push({ next, meta });
     },
@@ -544,6 +555,7 @@ test("RPC fallback edits all field kinds, validates retries, switches scope, res
   assert.equal(selectQueue.length, 0);
   assert.equal(inputQueue.length, 0);
   assert.equal(editorQueue.length, 0);
+  assert.equal(previewCalls, 0);
 
   assert.equal(result.mode, "rpc");
   assert.equal(result.opened, true);
@@ -641,6 +653,7 @@ test("Headless modes (print, json, and hasUI: false) return structured result wi
     const projectPath = path.join(tempRoot, "project.json");
     fs.writeFileSync(globalPath, JSON.stringify({ retries: 5 }), "utf8");
     fs.writeFileSync(projectPath, JSON.stringify({ enabled: false }), "utf8");
+    let previewCalls = 0;
 
     for (const [mode, hasUI] of [
       ["print", false],
@@ -659,6 +672,10 @@ test("Headless modes (print, json, and hasUI: false) return structured result wi
         schema,
         globalPath,
         projectPath,
+        renderPreview: () => {
+          previewCalls++;
+          return ["Inline preview"];
+        },
       });
 
       assert.equal(result.mode, mode);
@@ -670,6 +687,7 @@ test("Headless modes (print, json, and hasUI: false) return structured result wi
       assert.equal(result.paths.global, globalPath);
       assert.equal(result.paths.project, projectPath);
     }
+    assert.equal(previewCalls, 0);
 
     // Untrusted project in headless mode ignores project layer
     const { ctx: untrustedCtx } = createBaseContext({

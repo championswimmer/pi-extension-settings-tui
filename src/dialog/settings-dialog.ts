@@ -585,7 +585,13 @@ export class SettingsDialogComponent<TFields extends FieldMap>
 
   private getHeightBudget(): number {
     const rows = this.options.tui.terminal?.rows ?? 24;
-    return Math.max(8, rows - 4);
+    const maxHeight = this.options.maxHeight;
+    const overlayLimit = typeof maxHeight === "string" && /^\d+(?:\.\d+)?%$/.test(maxHeight)
+      ? Math.floor(rows * Number.parseFloat(maxHeight) / 100)
+      : typeof maxHeight === "number"
+        ? Math.floor(maxHeight)
+        : Infinity;
+    return Math.max(8, Math.min(rows - 4, overlayLimit));
   }
 
   render(width: number): string[] {
@@ -724,7 +730,16 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       maxHelpLines--;
     }
     const fixedChrome = baseChrome + maxHelpLines;
-    const bodyMaxRows = Math.max(1, maxLines - fixedChrome);
+    const bodyBudget = Math.max(1, maxLines - fixedChrome);
+    const previewBudget = Math.min(Math.floor(bodyBudget / 2), bodyBudget - 3);
+    const preview = this.renderPreview(innerWidth, previewBudget);
+    const bodyMaxRows = bodyBudget - preview.length;
+    if (this.options.renderPreview && bodyMaxRows !== this.lastBodyMaxRows) {
+      const previous = computeListWindow(rows.length, this.scrollOffset, this.lastBodyMaxRows);
+      if (this.selectedIndex >= previous.start && this.selectedIndex < previous.end) {
+        this.scrollOffset = ensureIndexInWindow(this.selectedIndex, this.scrollOffset, rows.length, bodyMaxRows);
+      }
+    }
     this.lastBodyMaxRows = bodyMaxRows;
 
     const lines: string[] = [];
@@ -758,7 +773,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     const win = computeListWindow(rows.length, this.scrollOffset, bodyMaxRows);
     this.scrollOffset = win.scrollOffset;
 
-    if (win.aboveCount > 0) {
+    if (bodyMaxRows > 2 && win.aboveCount > 0) {
       lines.push(
         renderBoxLine(
           renderScrollIndicator("up", win.aboveCount, innerWidth, theme),
@@ -798,7 +813,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       );
     }
 
-    if (win.belowCount > 0) {
+    if (bodyMaxRows > 2 && win.belowCount > 0) {
       lines.push(
         renderBoxLine(
           renderScrollIndicator("down", win.belowCount, innerWidth, theme),
@@ -806,6 +821,10 @@ export class SettingsDialogComponent<TFields extends FieldMap>
           theme,
         ),
       );
+    }
+
+    for (const line of preview) {
+      lines.push(renderBoxLine(line, safeWidth, theme));
     }
 
     // Help / status banner (respecting remaining budget)
@@ -833,6 +852,23 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     lines.push(renderBoxBottom(safeWidth, theme));
 
     return lines.slice(0, maxLines);
+  }
+
+  private renderPreview(width: number, maxRows: number): readonly string[] {
+    const { renderPreview, theme } = this.options;
+    if (!renderPreview || maxRows <= 0) return [];
+    try {
+      return renderPreview({
+        values: cloneValue(this.draftValues),
+        scope: this.activeScope,
+        tab: this.activeTabId,
+        theme,
+        width,
+        maxRows,
+      }).slice(0, maxRows);
+    } catch {
+      return [theme.fg("warning", "Preview unavailable")];
+    }
   }
 
   private getExternalSummaryDisplay(

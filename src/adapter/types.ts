@@ -1,4 +1,5 @@
 import type { OverlayOptions } from "@earendil-works/pi-tui";
+import type { RenderSettingsPreview } from "../dialog/index.js";
 import type {
   FieldMap,
   FieldProvenance,
@@ -29,6 +30,8 @@ export interface OpenSettingsDialogOptions<TFields extends FieldMap> {
   readonly saveMode?: SaveMode;
   readonly preferredWidth?: number;
   readonly overlayOptions?: OverlayOptions;
+  /** Synchronously render optional, read-only preview lines in the root TUI. */
+  readonly renderPreview?: RenderSettingsPreview<InferSettingsValues<TFields>>;
   /** Optional override for available models in `field.model` pickers (defaults to `ctx.modelRegistry.getAvailable()`). */
   readonly availableModels?: readonly ModelPickerEntry[] | (() => readonly ModelPickerEntry[]);
   /** Optional override for scoped models in `field.model` pickers (defaults to `ctx.scopedModels`). */

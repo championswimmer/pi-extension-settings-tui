@@ -31,7 +31,23 @@ Inside that single overlay, `SettingsDialogComponent` maintains an internal navi
   - `ConfirmRoute` — Confirmation dialog used by `Restore defaults` (with destructive styling and `Cancel` focused by default).
   - Custom sub-routes — Any `Component & Focusable` (with optional `title`, `handleMouse`, and `dispose()`) returned by `field.custom({ openSubroute })`.
 
-`SettingsDialogComponent` also bounds its total rendered height to `Math.max(8, (tui.terminal?.rows ?? 24) - 4)` and clamps every rendered line to `width` via `truncateToWidth` / `fitToWidth`.
+`SettingsDialogComponent` budgets its height against the terminal and the overlay's `maxHeight`, with an eight-line minimum. It clamps rendered lines to the dialog width.
+
+### Inline preview
+
+Pass `renderPreview` to `openSettingsDialog` or directly to `SettingsDialogComponent`. The dialog calls it with the current draft, including unsaved edits, plus the active `scope`, `tab` ID, Pi `theme`, available `width` in columns, and `maxRows`.
+
+```ts
+await openSettingsDialog(ctx, {
+  schema,
+  renderPreview: ({ values, theme }) => [
+    theme.fg("accent", theme.bold("Preview")),
+    theme.fg("text", values.enabled ? "✓ Sample task" : "Sample task"),
+  ],
+});
+```
+
+The callback in this example uses a schema with an `enabled` boolean. Return one terminal line per string, with optional ANSI styling from the theme. The dialog clips the result to the available space and reserves room for settings navigation and the footer. Return an empty array to hide the preview. Rendering is synchronous and can run on every redraw, so keep the callback free of I/O and side effects. The preview appears in the root TUI view in both save modes.
 
 ---
 

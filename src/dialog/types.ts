@@ -1,4 +1,4 @@
-import type { Component, Focusable, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
+import type { Component, Focusable, KeybindingsManager, OverlayOptions, TUI } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type {
   FieldMap,
@@ -65,6 +65,22 @@ export interface SettingsDialogResult<TValues extends Record<string, unknown>> {
   readonly closedBy: "save" | "cancel" | "escape" | "abort" | "immediate";
 }
 
+export interface SettingsPreviewContext<TValues extends Record<string, unknown>> {
+  /** Current values in the selected scope, including unsaved edits. */
+  readonly values: Readonly<TValues>;
+  readonly scope: SettingsScope;
+  readonly tab: string;
+  readonly theme: Theme;
+  /** Available content width in terminal columns. */
+  readonly width: number;
+  /** Maximum number of preview lines that fit on this render. */
+  readonly maxRows: number;
+}
+
+export type RenderSettingsPreview<TValues extends Record<string, unknown>> = (
+  context: SettingsPreviewContext<TValues>,
+) => readonly string[];
+
 /** Configuration options for `SettingsDialogComponent`. */
 export interface SettingsDialogOptions<TFields extends FieldMap> {
   readonly schema: SettingsSchema<TFields>;
@@ -78,6 +94,9 @@ export interface SettingsDialogOptions<TFields extends FieldMap> {
   readonly initialField?: string;
   readonly saveMode?: SaveMode;
   readonly preferredWidth?: number;
+  readonly maxHeight?: OverlayOptions["maxHeight"];
+  /** Synchronously render optional, read-only preview lines in the root settings view. */
+  readonly renderPreview?: RenderSettingsPreview<InferSettingsValues<TFields>>;
   /** Available models supplied to `field.model` pickers (populated automatically by `openSettingsDialog`). */
   readonly availableModels?: readonly ModelPickerEntry[] | (() => readonly ModelPickerEntry[]);
   /** Scoped models supplied to `field.model` pickers (populated automatically by `openSettingsDialog`). */

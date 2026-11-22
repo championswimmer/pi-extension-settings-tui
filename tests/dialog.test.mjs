@@ -235,6 +235,7 @@ async function setupDialog({
   customOpenSubroute,
   theme = createMockTheme(),
   wrapStore,
+  renderPreview,
 } = {}) {
   const schema = createRichSchema(schemaOverrides);
   if (customOpenSubroute) {
@@ -260,6 +261,7 @@ async function setupDialog({
     theme,
     keybindings,
     saveMode,
+    renderPreview,
     done: (res) => results.push(res),
     onApply: (next, meta) => {
       applied.push({ next, meta });
@@ -308,6 +310,104 @@ test("1. Height and width safety across 84x30, 46x24, and 70x12 terminals", asyn
     }
     assert.equal(tui.hideOverlayCalls, 0);
   }
+});
+
+test("inline preview uses the current draft and scope and stays on the root screen", async () => {
+  const theme = createMockTheme();
+  const calls = [];
+  const { adapter, dialog } = await setupDialog({
+    theme,
+    renderPreview: ({ values, scope, tab, theme: previewTheme, width, maxRows }) => {
+      calls.push({ tab, theme: previewTheme, width, maxRows });
+      return [previewTheme.fg("accent", `Sample: ${scope} / ${values.enabled ? "on" : "off"}`)];
+    },
+  });
+  let lines = dialog.render(84);
+  assert.ok(lines.some((line) => line.includes("Sample: global / on")));
+  assert.equal(calls.at(-1).tab, "general");
+  assert.equal(calls.at(-1).theme, theme);
+  assert.equal(calls.at(-1).width, 80);
+  assert.ok(calls.at(-1).maxRows >= 1);
+
+  const scopePosition = findTextPosition(lines, "Save scope");
+  assert.ok(scopePosition);
+  dialog.handleMouse(makeMouseEvent("press", scopePosition));
+  dialog.handleMouse(makeMouseEvent("click", { ...scopePosition, clickCount: 1 }));
+  dialog.navigateTo({ field: "enabled" });
+  dialog.handleInput(KEY_ENTER);
+  lines = dialog.render(84);
+  assert.ok(lines.some((line) => line.includes("Sample: project / off")));
+  assert.ok(lines.findIndex((line) => line.includes("Sample:")) > lines.findIndex((line) => line.includes("Enabled")));
+  assert.equal((await adapter.readLayer("project")).exists, false);
+
+  dialog.navigateTo({ field: "region" });
+  dialog.handleInput(KEY_ENTER);
+  const callCount = calls.length;
+  const pickerLines = dialog.render(84);
+  assert.ok(pickerLines[1].includes("General › Region"));
+  assert.ok(pickerLines.every((line) => !line.includes("Sample:")));
+  assert.equal(calls.length, callCount);
+  dialog.handleInput(KEY_ESC);
+  dialog.handleInput(KEY_TAB);
+  assert.ok(dialog.render(84).some((line) => line.includes("Sample: project / off")));
+  assert.equal(calls.at(-1).tab, "filters");
+});
+
+test("oversized inline preview stays within its budget and preserves the footer mouse targets", async () => {
+  const width = 52;
+  const rows = 22;
+  let previewBudget;
+  const { dialog, results, tui } = await setupDialog({
+    rows,
+    columns: width,
+    renderPreview: ({ maxRows }) => {
+      previewBudget = maxRows;
+      return Array.from({ length: maxRows + 1 }, (_, i) => `\x1b[31mSample ${i + 1} ${"🔄".repeat(width)}\x1b[0m`);
+    },
+  });
+  dialog.navigateTo({ field: "enabled" });
+  dialog.handleInput(KEY_ENTER);
+
+  tui.terminal.rows = 12;
+  const shortLines = dialog.render(width);
+  assert.equal(previewBudget, undefined);
+  assert.ok(shortLines.length <= 8);
+  assert.ok(stripTerminalSequences(shortLines.at(-1)).startsWith("╰"));
+  assert.ok(findTextPosition(shortLines, "[Ctrl+S Save]"));
+
+  tui.terminal.rows = rows;
+  const lines = dialog.render(width);
+  assert.ok(previewBudget >= 1);
+  const previewLines = lines.filter((line) => stripTerminalSequences(line).includes("Sample "));
+  assert.equal(previewLines.length, previewBudget);
+  assert.ok(previewLines.every((line) => line.includes("\x1b[31m")));
+  assert.ok(lines.every((line) => visibleWidth(line) <= width));
+  assert.ok(lines.length <= rows - 4);
+  assert.ok(stripTerminalSequences(lines.at(-1)).startsWith("╰"));
+  const savePosition = findTextPosition(lines, "[Ctrl+S Save]");
+  assert.ok(savePosition);
+  const target = { ...savePosition, width, height: lines.length };
+  dialog.handleMouse(makeMouseEvent("press", target));
+  dialog.handleMouse(makeMouseEvent("click", { ...target, clickCount: 1 }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(results[0]?.saved, true);
+  assert.equal(results[0]?.values.enabled, false);
+});
+
+test("a failing inline preview leaves the draft usable", async () => {
+  const { dialog } = await setupDialog({
+    renderPreview: ({ values }) => {
+      values.enabled = !values.enabled;
+      throw new Error("broken host preview");
+    },
+  });
+  let lines = dialog.render(84);
+  assert.match(findTextPosition(lines, "Enabled")?.line ?? "", /\bOn\b/);
+  assert.ok(findTextPosition(lines, "Preview unavailable"));
+  dialog.handleInput(KEY_ENTER);
+  lines = dialog.render(84);
+  assert.match(findTextPosition(lines, "Enabled")?.line ?? "", /\bOff\b/);
+  assert.ok(findTextPosition(lines, "● Unsaved"));
 });
 
 test("2. Tab switching via keyboard (Tab/Shift+Tab) and fullscreen mouse click", async () => {
