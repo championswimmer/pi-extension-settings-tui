@@ -4,6 +4,20 @@ All notable changes to `pi-extension-settings-tui` are documented here.
 Entries are generated from git history by [git-cliff](https://git-cliff.org) on every release.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows [Semantic Versioning](https://semver.org/).
 
+## [0.7.0](https://github.com/championswimmer/pi-extension-settings-tui/compare/v0.6.0...v0.7.0) - 2026-11-22
+
+### 🚀 Features
+
+- **dialog:** Add inline previews for settings drafts ([04e5057](https://github.com/championswimmer/pi-extension-settings-tui/commit/04e5057edf3fb5b8726a19e395dc5dfb57865204))
+
+### 📚 Documentation
+
+- Add per-widget demo recordings to field types guide and README ([fa1927f](https://github.com/championswimmer/pi-extension-settings-tui/commit/fa1927fa4efc2aaeecdeba5f7106390dd750aa78))
+
+### ⚙️ Miscellaneous Tasks
+
+- **skills:** Drop AI co-author trailers from commit and release skills ([f52ccea](https://github.com/championswimmer/pi-extension-settings-tui/commit/f52ccea6c804e5d8d7a6fdb884a38c151a3d5cbe))
+
 ## [0.6.0](https://github.com/championswimmer/pi-extension-settings-tui/compare/v0.5.1...v0.6.0) - 2026-11-21
 
 ### ⚙️ Miscellaneous Tasks
