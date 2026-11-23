@@ -4,6 +4,12 @@ All notable changes to `pi-extension-settings-tui` are documented here.
 Entries are generated from git history by [git-cliff](https://git-cliff.org) on every release.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows [Semantic Versioning](https://semver.org/).
 
+## [0.8.0](https://github.com/championswimmer/pi-extension-settings-tui/compare/v0.7.0...v0.8.0) - 2026-11-23
+
+### ⚡ Performance
+
+- **adapter:** Lazy-load dialog/RPC, remove pi-tui from RPC, drop maps ([cac6a76](https://github.com/championswimmer/pi-extension-settings-tui/commit/cac6a76cd93f75305ab9ac5039f6e60ad310c7ad))
+
 ## [0.7.0](https://github.com/championswimmer/pi-extension-settings-tui/compare/v0.6.0...v0.7.0) - 2026-11-22
 
 ### 🚀 Features
