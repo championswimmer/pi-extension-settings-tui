@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { OverlayHandle, OverlayOptions } from "@earendil-works/pi-tui";
-import { SettingsDialogComponent, type SettingsDialogResult } from "../dialog/index.js";
+import type { SettingsDialogComponent, SettingsDialogResult } from "../dialog/index.js";
 import type {
   FieldMap,
   FieldProvenance,
@@ -12,7 +12,6 @@ import type {
   SettingsScope,
 } from "../schema/index.js";
 import { createSettingsStore } from "../store/index.js";
-import { runRpcSettingsMenu } from "./rpc-fallback.js";
 import type { OpenSettingsDialogOptions, OpenSettingsDialogResult } from "./types.js";
 
 interface ActiveDialogEntry<TFields extends FieldMap = FieldMap> {
@@ -95,6 +94,21 @@ export async function openSettingsDialog<TFields extends FieldMap>(
     options.scopedModels ?? (() => (Array.isArray(ctx.scopedModels) ? ctx.scopedModels : []));
 
   if (ctx.mode === "tui" && ctx.hasUI) {
+    if (ctx.signal?.aborted) {
+      return {
+        mode: "tui",
+        opened: false,
+        saved: false,
+        values: loaded.effective,
+        scope: initialScope,
+        paths: loaded.paths,
+        warnings: loaded.warnings,
+        closedBy: "abort",
+      };
+    }
+
+    const { SettingsDialogComponent } = await import("../dialog/settings-dialog.js");
+
     if (ctx.signal?.aborted) {
       return {
         mode: "tui",
@@ -213,6 +227,7 @@ export async function openSettingsDialog<TFields extends FieldMap>(
   }
 
   if (ctx.mode === "rpc" && ctx.hasUI) {
+    const { runRpcSettingsMenu } = await import("./rpc-fallback.js");
     return runRpcSettingsMenu(ctx, schema, store, loaded, {
       saveMode: options.saveMode,
       onApply: options.onApply,

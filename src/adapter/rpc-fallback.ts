@@ -1,5 +1,4 @@
 import type { ExtensionContext, ExtensionUIDialogOptions } from "@earendil-works/pi-coding-agent";
-import { fuzzyFilter } from "@earendil-works/pi-tui";
 import {
   cloneValue,
   deepEqual,
@@ -44,6 +43,140 @@ type RpcMenuAction<TFields extends FieldMap> =
   | { readonly kind: "save" }
   | { readonly kind: "discard" }
   | { readonly kind: "done" };
+
+const WORD_BOUNDARY_RE = /[\s\-_./:]/;
+
+interface FuzzyMatchResult {
+  readonly matches: boolean;
+  readonly score: number;
+}
+
+function scorePositions(textLower: string, positions: readonly number[]): number {
+  let score = 0;
+  let lastMatchIndex = -1;
+  let consecutiveMatches = 0;
+
+  for (const i of positions) {
+    if (lastMatchIndex === i - 1) {
+      consecutiveMatches++;
+      score -= consecutiveMatches * 5;
+    } else {
+      consecutiveMatches = 0;
+      if (lastMatchIndex >= 0) {
+        score += (i - lastMatchIndex - 1) * 2;
+      }
+    }
+
+    if (i === 0 || WORD_BOUNDARY_RE.test(textLower[i - 1]!)) {
+      score -= 10;
+    }
+
+    score += i * 0.1;
+    lastMatchIndex = i;
+  }
+
+  return score;
+}
+
+function matchFuzzyToken(normalizedQuery: string, textLower: string): FuzzyMatchResult {
+  if (normalizedQuery.length === 0) {
+    return { matches: true, score: 0 };
+  }
+  if (normalizedQuery.length > textLower.length) {
+    return { matches: false, score: 0 };
+  }
+
+  const positions: number[] = [];
+  let lastMatchIndex = -1;
+  for (let queryIndex = 0; queryIndex < normalizedQuery.length; queryIndex++) {
+    const i = textLower.indexOf(normalizedQuery[queryIndex]!, lastMatchIndex + 1);
+    if (i === -1) {
+      return { matches: false, score: 0 };
+    }
+    positions.push(i);
+    lastMatchIndex = i;
+  }
+
+  let score = scorePositions(textLower, positions);
+
+  for (
+    let start = textLower.indexOf(normalizedQuery);
+    start !== -1;
+    start = textLower.indexOf(normalizedQuery, start + 1)
+  ) {
+    for (let k = 0; k < positions.length; k++) {
+      positions[k] = start + k;
+    }
+    score = Math.min(score, scorePositions(textLower, positions));
+  }
+
+  if (normalizedQuery === textLower) {
+    score -= 100;
+  }
+
+  return { matches: true, score };
+}
+
+function fuzzyMatch(query: string, text: string): FuzzyMatchResult {
+  const queryLower = query.toLowerCase();
+  const textLower = text.toLowerCase();
+
+  const primary = matchFuzzyToken(queryLower, textLower);
+  if (primary.matches) {
+    return primary;
+  }
+
+  const alphaNumeric = queryLower.match(/^(?<letters>[a-z]+)(?<digits>[0-9]+)$/);
+  const numericAlpha = queryLower.match(/^(?<digits>[0-9]+)(?<letters>[a-z]+)$/);
+  const swappedQuery = alphaNumeric
+    ? `${alphaNumeric.groups?.digits ?? ""}${alphaNumeric.groups?.letters ?? ""}`
+    : numericAlpha
+      ? `${numericAlpha.groups?.letters ?? ""}${numericAlpha.groups?.digits ?? ""}`
+      : "";
+
+  if (!swappedQuery) {
+    return primary;
+  }
+
+  const swapped = matchFuzzyToken(swappedQuery, textLower);
+  return swapped.matches ? { matches: true, score: swapped.score + 5 } : primary;
+}
+
+function fuzzyFilter<T>(items: readonly T[], query: string, getText: (item: T) => string): T[] {
+  const trimmed = query.trim();
+  if (!trimmed) {
+    return [...items];
+  }
+
+  const tokens = trimmed.split(/[\s/]+/).filter((t) => t.length > 0);
+  if (tokens.length === 0) {
+    return [...items];
+  }
+
+  const results: Array<{ readonly item: T; readonly totalScore: number }> = [];
+  for (const item of items) {
+    const text = getText(item);
+    let totalScore = 0;
+    let allMatch = true;
+
+    for (const token of tokens) {
+      const match = fuzzyMatch(token, text);
+      if (match.matches) {
+        totalScore += match.score;
+      } else {
+        allMatch = false;
+        break;
+      }
+    }
+
+    if (allMatch) {
+      results.push({ item, totalScore });
+    }
+  }
+
+  results.sort((a, b) => a.totalScore - b.totalScore);
+  return results.map((r) => r.item);
+}
 
 function resolveInitialScope<TFields extends FieldMap>(
   schema: SettingsSchema<TFields>,
