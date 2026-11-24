@@ -4,6 +4,12 @@ All notable changes to `pi-extension-settings-tui` are documented here.
 Entries are generated from git history by [git-cliff](https://git-cliff.org) on every release.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows [Semantic Versioning](https://semver.org/).
 
+## [0.9.1](https://github.com/championswimmer/pi-extension-settings-tui/compare/v0.9.0...v0.9.1) - 2026-11-24
+
+### 🐛 Bug Fixes
+
+- **adapter:** Keep pi-tui runtime import so Pi jiti resolves lazy dialog ([f5fd331](https://github.com/championswimmer/pi-extension-settings-tui/commit/f5fd33149613c4962a67ca51fa050c6d09f86b52))
+
 ## [0.9.0](https://github.com/championswimmer/pi-extension-settings-tui/compare/v0.8.0...v0.9.0) - 2026-11-24
 
 ### 🚀 Features
