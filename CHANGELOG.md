@@ -4,6 +4,12 @@ All notable changes to `pi-extension-settings-tui` are documented here.
 Entries are generated from git history by [git-cliff](https://git-cliff.org) on every release.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows [Semantic Versioning](https://semver.org/).
 
+## [0.9.0](https://github.com/championswimmer/pi-extension-settings-tui/compare/v0.8.0...v0.9.0) - 2026-11-24
+
+### 🚀 Features
+
+- Add session scope, session-draft save mode, and 3-layer provenance ([1a9512b](https://github.com/championswimmer/pi-extension-settings-tui/commit/1a9512bded3ca1da35be69d2ac831fd77ca38cf9))
+
 ## [0.8.0](https://github.com/championswimmer/pi-extension-settings-tui/compare/v0.7.0...v0.8.0) - 2026-11-23
 
 ### ⚡ Performance
