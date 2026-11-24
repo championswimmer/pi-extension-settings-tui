@@ -1,6 +1,14 @@
-export type SettingsScope = "global" | "project";
-export type FieldProvenance = "default" | "global" | "project" | "both";
-export type SaveMode = "draft" | "immediate";
+export type SettingsScope = "global" | "project" | "session";
+export type FieldProvenance =
+  | "default"
+  | "global"
+  | "project"
+  | "both"
+  | "session"
+  | "global+session"
+  | "project+session"
+  | "all";
+export type SaveMode = "draft" | "immediate" | "session-draft";
 export type ValueTone = "default" | "accent" | "warn" | "error" | "success" | "muted";
 export type DialogNotificationTone = "info" | "success" | "warn" | "error";
 
@@ -452,6 +460,7 @@ export interface PartialValidationResult<TValues extends Record<string, unknown>
 export interface SettingsLayersData<TValues extends Record<string, unknown>> {
   readonly global: Partial<TValues>;
   readonly project: Partial<TValues>;
+  readonly session?: Partial<TValues>;
 }
 
 export interface SettingsSchema<TFields extends FieldMap = FieldMap> {
@@ -488,11 +497,11 @@ export interface SettingsSchema<TFields extends FieldMap = FieldMap> {
   validatePartial(raw: unknown): PartialValidationResult<InferSettingsValues<TFields>>;
   resolveEffective(
     layers: SettingsLayersData<InferSettingsValues<TFields>>,
-    options?: { includeProject?: boolean },
+    options?: { includeProject?: boolean; includeSession?: boolean },
   ): InferSettingsValues<TFields>;
   computeProvenance(
     layers: SettingsLayersData<InferSettingsValues<TFields>>,
-    options?: { includeProject?: boolean },
+    options?: { includeProject?: boolean; includeSession?: boolean },
   ): Record<PersistedFieldKeys<TFields>, FieldProvenance>;
   diffForScope(
     nextValues: InferSettingsValues<TFields>,

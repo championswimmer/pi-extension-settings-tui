@@ -12,12 +12,14 @@ import type {
   SettingsScope,
   StoragePathConfig,
 } from "../schema/index.js";
-import type { SettingsStore, StorageAdapter } from "../store/index.js";
+import type { SessionStorageOptions, SettingsStore, StorageAdapter } from "../store/index.js";
 
 export interface OpenSettingsDialogOptions<TFields extends FieldMap> {
   readonly schema: SettingsSchema<TFields>;
   readonly store?: SettingsStore<TFields>;
   readonly adapter?: StorageAdapter;
+  readonly sessionAdapter?: StorageAdapter;
+  readonly session?: Omit<SessionStorageOptions, "scope">;
   readonly agentDir?: string;
   readonly cwd?: string;
   readonly settingsFile?: string;
@@ -30,6 +32,7 @@ export interface OpenSettingsDialogOptions<TFields extends FieldMap> {
   readonly saveMode?: SaveMode;
   readonly preferredWidth?: number;
   readonly overlayOptions?: OverlayOptions;
+  readonly signal?: AbortSignal;
   /** Synchronously render optional, read-only preview lines in the root TUI. */
   readonly renderPreview?: RenderSettingsPreview<InferSettingsValues<TFields>>;
   /** Optional override for available models in `field.model` pickers (defaults to `ctx.modelRegistry.getAvailable()`). */

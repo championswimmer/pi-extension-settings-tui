@@ -23,6 +23,10 @@ export interface SessionStorageOptions {
   ) => void | Promise<void>;
   readonly getEntries: () => readonly SessionEntryLike[];
   readonly scope?: SettingsScope;
+  readonly matchEntry?: (entry: SessionEntryLike) => boolean;
+  readonly deserialize?: (data: Record<string, unknown>) => Record<string, unknown> | null;
+  readonly serialize?: (data: Record<string, unknown>) => Record<string, unknown>;
+  readonly deletedData?: Record<string, unknown>;
 }
 
 const DELETED_TOMBSTONE_KEY = "__deleted";
@@ -37,11 +41,17 @@ export function createSessionStorageAdapter(
     const entries = options.getEntries();
     for (let i = entries.length - 1; i >= 0; i -= 1) {
       const entry = entries[i];
+      if (!entry) {
+        continue;
+      }
       if (entry.type !== undefined && entry.type !== "custom") {
         continue;
       }
       const entryName = entry.customType ?? entry.entryType;
       if (entryName !== options.entryType) {
+        continue;
+      }
+      if (options.matchEntry && !options.matchEntry(entry)) {
         continue;
       }
       if (!isPlainRecord(entry.data)) {
@@ -50,7 +60,12 @@ export function createSessionStorageAdapter(
       if (entry.data[DELETED_TOMBSTONE_KEY] === true) {
         return { data: null, hash: null, exists: false };
       }
-      const cloned = cloneValue(entry.data);
+      const rawClone = cloneValue(entry.data);
+      const unwrapped = options.deserialize ? options.deserialize(rawClone) : rawClone;
+      if (unwrapped === null || !isPlainRecord(unwrapped)) {
+        return { data: null, hash: null, exists: false };
+      }
+      const cloned = cloneValue(unwrapped);
       const serialized = JSON.stringify(cloned, null, 2) + "\n";
       return {
         data: cloned,
@@ -59,6 +74,13 @@ export function createSessionStorageAdapter(
       };
     }
     return { data: null, hash: null, exists: false };
+  }
+
+  function buildTombstone(): Record<string, unknown> {
+    return {
+      ...(options.deletedData ? cloneValue(options.deletedData) : {}),
+      [DELETED_TOMBSTONE_KEY]: true,
+    };
   }
 
   function assertTargetScope(scope: SettingsScope): void {
@@ -110,7 +132,7 @@ export function createSessionStorageAdapter(
 
       if (Object.keys(data).length === 0) {
         if (current.exists) {
-          await options.appendEntry(options.entryType, { [DELETED_TOMBSTONE_KEY]: true });
+          await options.appendEntry(options.entryType, buildTombstone());
           return { hash: null, deleted: true };
         }
         return { hash: null, deleted: false };
@@ -119,7 +141,19 @@ export function createSessionStorageAdapter(
       const payload = cloneValue(data);
       const serialized = JSON.stringify(payload, null, 2) + "\n";
       const hash = computeJsonHash(serialized);
-      await options.appendEntry(options.entryType, payload);
+      const entryPayload = options.serialize ? options.serialize(cloneValue(payload)) : payload;
+      if (!isPlainRecord(entryPayload)) {
+        throw new Error("Serialized session settings payload must be a plain JSON object.");
+      }
+      const serializedSecrets = findSecretKeys(entryPayload);
+      if (serializedSecrets.length > 0) {
+        throw new SettingsSecurityError(
+          "SECRET_KEY_REJECTED",
+          `Refusing to persist forbidden secret key(s): ${serializedSecrets.join(", ")}`,
+          { keys: serializedSecrets },
+        );
+      }
+      await options.appendEntry(options.entryType, entryPayload);
       return { hash, deleted: false };
     },
 
@@ -136,7 +170,7 @@ export function createSessionStorageAdapter(
         throw new ConcurrencyConflictError(scope);
       }
       if (current.exists) {
-        await options.appendEntry(options.entryType, { [DELETED_TOMBSTONE_KEY]: true });
+        await options.appendEntry(options.entryType, buildTombstone());
       }
     },
   };

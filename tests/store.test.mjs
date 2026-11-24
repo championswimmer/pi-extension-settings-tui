@@ -12,6 +12,7 @@ import {
   assertSafeRelativeSettingsFile,
   computeJsonHash,
   createJsonFileStorageAdapter,
+  createLayeredStorageAdapter,
   createMemoryStorageAdapter,
   createSessionStorageAdapter,
   createSettingsStore,
@@ -973,5 +974,132 @@ describe("store / session and memory adapters", () => {
         ),
       /not persisted/i,
     );
+  });
+
+  it("supports 3-layer global + project + session storage with createLayeredStorageAdapter and session hooks", async () => {
+    const tmp = makeTempDir();
+    const agentDir = path.join(tmp, "agent");
+    const cwd = path.join(tmp, "project");
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.mkdirSync(cwd, { recursive: true });
+
+    const schema = defineSettings({
+      id: "layered-3",
+      title: "Layered 3",
+      settingsFile: "layered-3.json",
+      scopes: ["global", "project", "session"],
+      defaultScope: "global",
+      saveMode: "session-draft",
+      fields: {
+        maxOpen: field.integer({ label: "Max open", default: 8, min: 1, max: 64 }),
+        maxTotal: field.integer({ label: "Max total", default: 16, min: 1, max: 64 }),
+      },
+    });
+
+    const entries = [
+      {
+        type: "custom",
+        customType: "test:settings:v1",
+        data: { session: "other-session", overrides: { maxOpen: 99 } },
+      },
+      {
+        type: "custom",
+        customType: "test:settings:v1",
+        data: { session: "sess-1", limits: { maxOpen: 4, maxTotal: 16 } },
+      },
+    ];
+
+    const sessionConfig = {
+      entryType: "test:settings:v1",
+      appendEntry: (type, data) => entries.push({ type: "custom", customType: type, data }),
+      getEntries: () => entries,
+      matchEntry: (entry) => entry.data?.session === "sess-1",
+      deserialize: (data) => {
+        if (data.limits && typeof data.limits === "object") return data.limits;
+        if (data.overrides && typeof data.overrides === "object") return data.overrides;
+        return null;
+      },
+      serialize: (data) => ({ session: "sess-1", overrides: data }),
+      deletedData: { session: "sess-1" },
+    };
+
+    const store = createSettingsStore(schema, {
+      agentDir,
+      cwd,
+      session: sessionConfig,
+    });
+
+    assert.deepEqual(store.getPaths(), {
+      global: path.join(agentDir, "layered-3.json"),
+      project: path.join(cwd, ".pi", "layered-3.json"),
+      session: "session://test:settings:v1",
+    });
+
+    // Legacy session limits load cleanly
+    const l0 = await store.load({ trustedProject: true });
+    assert.deepEqual(l0.effective, { maxOpen: 4, maxTotal: 16 });
+    assert.equal(l0.provenance.maxOpen, "session");
+    assert.ok(typeof l0.snapshot.sessionHash === "string");
+
+    // Consecutive session patches with serialize/deserialize preserve consistent expectedHash
+    const s1 = await store.patch(
+      { maxTotal: 32 },
+      { scope: "session", trustedProject: true, expectedSnapshot: l0.snapshot },
+    );
+    assert.deepEqual(s1.loaded.effective, { maxOpen: 4, maxTotal: 32 });
+    const s2 = await store.patch(
+      { maxOpen: 6 },
+      { scope: "session", trustedProject: true, expectedSnapshot: s1.loaded.snapshot },
+    );
+    assert.deepEqual(s2.loaded.effective, { maxOpen: 6, maxTotal: 32 });
+
+    // Stale session snapshot fails with ConcurrencyConflictError
+    await assert.rejects(
+      () => store.patch({ maxOpen: 5 }, { scope: "session", expectedSnapshot: s1.loaded.snapshot }),
+      (err) => err instanceof ConcurrencyConflictError && err.scope === "session",
+    );
+
+    // Global + Project + Session layering & provenance
+    const g1 = await store.patch(
+      { maxOpen: 10 },
+      { scope: "global", trustedProject: true, expectedSnapshot: s2.loaded.snapshot },
+    );
+    const p1 = await store.patch(
+      { maxOpen: 12 },
+      { scope: "project", trustedProject: true, expectedSnapshot: g1.loaded.snapshot },
+    );
+    assert.equal(p1.loaded.effective.maxOpen, 6);
+    assert.equal(p1.loaded.provenance.maxOpen, "all");
+
+    // Restore session reverts to project (maxOpen: 12) and global/default (maxTotal: 16)
+    const r1 = await store.restoreDefaults({
+      scope: "session",
+      trustedProject: true,
+      expectedSnapshot: p1.loaded.snapshot,
+    });
+    assert.deepEqual(r1.loaded.effective, { maxOpen: 12, maxTotal: 16 });
+    assert.equal(r1.loaded.provenance.maxOpen, "both");
+    assert.equal(r1.loaded.provenance.maxTotal, "default");
+    assert.deepEqual(entries.at(-1).data, { session: "sess-1", __deleted: true });
+
+    // JSON adapter alone rejects session writes; createLayeredStorageAdapter routes missing scopes cleanly
+    const jsonOnly = createJsonFileStorageAdapter(schema, { agentDir, cwd });
+    await assert.rejects(() => jsonOnly.writeLayer("session", { maxOpen: 1 }), /session/i);
+    assert.throws(() => resolveScopeFilePath(schema, "session"), (err) => err instanceof SettingsSecurityError);
+    const partialLayered = createLayeredStorageAdapter({ global: jsonOnly });
+    assert.deepEqual(await partialLayered.readLayer("session"), { data: null, hash: null, exists: false });
+    await assert.rejects(() => partialLayered.writeLayer("session", { maxOpen: 1 }), /No storage adapter/);
+
+    // Memory adapter supports session scope too
+    const mem = createMemoryStorageAdapter({
+      global: { maxOpen: 2 },
+      project: { maxTotal: 20 },
+      session: { maxOpen: 3 },
+    });
+    const memStore = createSettingsStore(schema, { adapter: mem });
+    const memLoaded = await memStore.load({ trustedProject: true });
+    assert.deepEqual(memLoaded.effective, { maxOpen: 3, maxTotal: 20 });
+    assert.equal(memLoaded.provenance.maxOpen, "global+session");
+    assert.equal(memLoaded.provenance.maxTotal, "project");
   });
 });

@@ -25,6 +25,7 @@ import {
   type NumberFieldDef,
   type PersistedFieldKeys,
   type PickerFieldDef,
+  type SaveMode,
   type SettingsSchema,
   type SettingsScope,
   type StringFieldDef,
@@ -39,6 +40,7 @@ import type { OpenSettingsDialogOptions, OpenSettingsDialogResult } from "./type
 type RpcMenuAction<TFields extends FieldMap> =
   | { readonly kind: "field"; readonly key: keyof TFields & string; readonly def: AnyFieldDef }
   | { readonly kind: "scope" }
+  | { readonly kind: "resetSession" }
   | { readonly kind: "restore" }
   | { readonly kind: "save" }
   | { readonly kind: "discard" }
@@ -181,25 +183,37 @@ function fuzzyFilter<T>(items: readonly T[], query: string, getText: (item: T) =
 function resolveInitialScope<TFields extends FieldMap>(
   schema: SettingsSchema<TFields>,
   trustedProject: boolean,
+  saveMode?: SaveMode,
 ): SettingsScope {
-  if (!trustedProject && schema.defaultScope === "project" && schema.scopes.includes("global")) {
+  const effectiveSaveMode = saveMode ?? schema.saveMode;
+  const selectable =
+    effectiveSaveMode === "session-draft"
+      ? schema.scopes.filter((s) => s !== "session")
+      : schema.scopes;
+  if (!trustedProject && schema.defaultScope === "project" && selectable.includes("global")) {
     return "global";
   }
-  if (schema.scopes.includes(schema.defaultScope)) {
+  if (selectable.includes(schema.defaultScope)) {
     return schema.defaultScope;
   }
-  return schema.scopes[0] ?? "global";
+  return selectable[0] ?? "global";
 }
 
 function getAvailableScopes<TFields extends FieldMap>(
   schema: SettingsSchema<TFields>,
   trustedProject: boolean,
+  saveMode?: SaveMode,
 ): readonly SettingsScope[] {
+  const effectiveSaveMode = saveMode ?? schema.saveMode;
+  const base =
+    effectiveSaveMode === "session-draft"
+      ? schema.scopes.filter((s) => s !== "session")
+      : schema.scopes;
   if (trustedProject) {
-    return schema.scopes;
+    return base;
   }
-  const filtered = schema.scopes.filter((scope) => scope !== "project");
-  return filtered.length > 0 ? filtered : schema.scopes;
+  const filtered = base.filter((scope) => scope !== "project");
+  return filtered.length > 0 ? filtered : base;
 }
 
 function formatProvenanceBadge(provenance: FieldProvenance): string {
@@ -210,7 +224,16 @@ function formatProvenanceBadge(provenance: FieldProvenance): string {
       return "[P]";
     case "both":
       return "[P>G]";
+    case "session":
+      return "[S]";
+    case "global+session":
+      return "[S>G]";
+    case "project+session":
+      return "[S>P]";
+    case "all":
+      return "[S>P>G]";
     case "default":
+    default:
       return "[default]";
   }
 }
@@ -239,6 +262,12 @@ function getScopeRestrictionInfo<TFields extends FieldMap>(
       reason: trustedProject
         ? "Project-only setting. Switch Save scope to Project to edit."
         : "Project-only setting. This project is not trusted, so Project scope is locked.",
+    };
+  }
+  if (allowedScopes.length === 1 && allowedScopes[0] === "session") {
+    return {
+      tag: "[Session only]",
+      reason: "Session-only setting. Switch Save scope to Session to edit.",
     };
   }
   return {
@@ -1008,22 +1037,30 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
   loaded: LoadedSettings<InferSettingsValues<TFields>>,
   options?: Pick<
     OpenSettingsDialogOptions<TFields>,
-    "saveMode" | "onApply" | "initialTab" | "initialField" | "availableModels" | "scopedModels"
+    | "saveMode"
+    | "onApply"
+    | "initialTab"
+    | "initialField"
+    | "availableModels"
+    | "scopedModels"
+    | "signal"
   >,
 ): Promise<OpenSettingsDialogResult<InferSettingsValues<TFields>>> {
   const saveMode = options?.saveMode ?? schema.saveMode;
-  const availableScopes = getAvailableScopes(schema, loaded.trustedProject);
-  let scope = resolveInitialScope(schema, loaded.trustedProject);
+  const signal = options?.signal ?? ctx.signal;
+  const availableScopes = getAvailableScopes(schema, loaded.trustedProject, saveMode);
+  let scope = resolveInitialScope(schema, loaded.trustedProject, saveMode);
   let currentLoaded = loaded;
   let draft = cloneValue(loaded.effective);
   let saved = false;
 
   const persistValues = async (
     nextValues: InferSettingsValues<TFields>,
+    targetScope: SettingsScope = scope,
   ): Promise<boolean> => {
     try {
       const saveResult = await store.save(nextValues, {
-        scope,
+        scope: targetScope,
         trustedProject: currentLoaded.trustedProject,
         expectedSnapshot: currentLoaded.snapshot,
       });
@@ -1052,8 +1089,50 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
     }
   };
 
+  const persistSessionToPersistentScope = async (): Promise<boolean> => {
+    try {
+      const valuesToSave = cloneValue(draft);
+      const saveResult = await store.save(valuesToSave, {
+        scope,
+        trustedProject: currentLoaded.trustedProject,
+        expectedSnapshot: currentLoaded.snapshot,
+      });
+      let finalLoaded = saveResult.loaded;
+      if (Object.keys(finalLoaded.layers.session ?? {}).length > 0) {
+        const pruned = await store.save(valuesToSave, {
+          scope: "session",
+          trustedProject: finalLoaded.trustedProject,
+          expectedSnapshot: finalLoaded.snapshot,
+        });
+        finalLoaded = pruned.loaded;
+      }
+      currentLoaded = finalLoaded;
+      draft = cloneValue(currentLoaded.effective);
+      saved = true;
+      await options?.onApply?.(currentLoaded.effective, {
+        scope: saveResult.savedScope,
+        provenance: currentLoaded.provenance,
+        writtenKeys: saveResult.writtenKeys,
+      });
+      return true;
+    } catch (err) {
+      if (err instanceof ConcurrencyConflictError) {
+        ctx.ui.notify(
+          `Settings were modified externally in ${err.scope} scope. Reloaded latest values.`,
+          "error",
+        );
+        currentLoaded = await store.load({ trustedProject: currentLoaded.trustedProject });
+        draft = cloneValue(currentLoaded.effective);
+        return false;
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      ctx.ui.notify(`Failed to save settings: ${message}`, "error");
+      return false;
+    }
+  };
+
   while (true) {
-    if (ctx.signal?.aborted) {
+    if (signal?.aborted) {
       return {
         mode: "rpc",
         opened: true,
@@ -1066,8 +1145,10 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
       };
     }
 
-    const dialogOpts = getDialogOpts(ctx.signal);
+    const dialogOpts = getDialogOpts(signal);
     const dirty = !deepEqual(draft, currentLoaded.effective);
+    const hasSession = Object.keys(currentLoaded.layers.session ?? {}).length > 0;
+    const editScope = saveMode === "session-draft" ? "session" : scope;
     const visibleFields = collectVisibleFields(schema, draft);
     const menuItems: string[] = [];
     const itemToAction = new Map<string, RpcMenuAction<TFields>>();
@@ -1082,7 +1163,7 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
         schema,
         key,
         def,
-        scope,
+        editScope,
         currentLoaded.trustedProject,
         fieldLabel,
       );
@@ -1142,9 +1223,16 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
     }
 
     if (availableScopes.length > 1) {
-      const scopeLabel = `Save scope: ${scope === "global" ? "Global" : "Project"}`;
+      const scopeDisplay = scope === "global" ? "Global" : scope === "project" ? "Project" : "Session";
+      const scopeLabel = `Save scope: ${scopeDisplay}`;
       itemToAction.set(scopeLabel, { kind: "scope" });
       menuItems.push(scopeLabel);
+    }
+
+    if (saveMode === "session-draft" && hasSession) {
+      const resetSessionLabel = "Reset session";
+      itemToAction.set(resetSessionLabel, { kind: "resetSession" });
+      menuItems.push(resetSessionLabel);
     }
 
     const restoreLabel = "Restore defaults";
@@ -1157,6 +1245,13 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
       itemToAction.set(saveLabel, { kind: "save" });
       itemToAction.set(discardLabel, { kind: "discard" });
       menuItems.push(saveLabel, discardLabel);
+    } else if (saveMode === "session-draft") {
+      const scopeDisplay = scope === "project" ? "Project" : "Global";
+      const saveLabel = hasSession ? `Save to ${scopeDisplay}*` : `Save to ${scopeDisplay}`;
+      const doneLabel = "Done";
+      itemToAction.set(saveLabel, { kind: "save" });
+      itemToAction.set(doneLabel, { kind: "done" });
+      menuItems.push(saveLabel, doneLabel);
     } else {
       const doneLabel = "Done";
       itemToAction.set(doneLabel, { kind: "done" });
@@ -1165,7 +1260,7 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
 
     const selected = await ctx.ui.select(schema.title, menuItems, dialogOpts);
 
-    if (ctx.signal?.aborted) {
+    if (signal?.aborted) {
       return {
         mode: "rpc",
         opened: true,
@@ -1185,7 +1280,7 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
           "You have unsaved changes. Discard them and close?",
           dialogOpts,
         );
-        if (ctx.signal?.aborted) {
+        if (signal?.aborted) {
           return {
             mode: "rpc",
             opened: true,
@@ -1227,7 +1322,7 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
         scope,
         paths: currentLoaded.paths,
         warnings: currentLoaded.warnings,
-        closedBy: "immediate",
+        closedBy: saveMode === "session-draft" ? "escape" : "immediate",
       };
     }
 
@@ -1238,7 +1333,7 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
           "You have unsaved changes. Discard them and close?",
           dialogOpts,
         );
-        if (ctx.signal?.aborted) {
+        if (signal?.aborted) {
           return {
             mode: "rpc",
             opened: true,
@@ -1267,7 +1362,10 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
     }
 
     if (action.kind === "save") {
-      const ok = await persistValues(draft);
+      const ok =
+        saveMode === "session-draft"
+          ? await persistSessionToPersistentScope()
+          : await persistValues(draft);
       if (ok) {
         return {
           mode: "rpc",
@@ -1290,6 +1388,46 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
       continue;
     }
 
+    if (action.kind === "resetSession") {
+      const confirmed = await ctx.ui.confirm(
+        "Reset session",
+        "Clear all session-level overrides and revert to saved Global/Project values?",
+        dialogOpts,
+      );
+      if (!confirmed) {
+        continue;
+      }
+      try {
+        const restoreResult = await store.restoreDefaults({
+          scope: "session",
+          trustedProject: currentLoaded.trustedProject,
+          expectedSnapshot: currentLoaded.snapshot,
+        });
+        currentLoaded = restoreResult.loaded;
+        draft = cloneValue(currentLoaded.effective);
+        saved = true;
+        await options?.onApply?.(currentLoaded.effective, {
+          scope: "session",
+          provenance: currentLoaded.provenance,
+          writtenKeys: restoreResult.writtenKeys,
+        });
+        ctx.ui.notify("Cleared session overrides.", "info");
+      } catch (err) {
+        if (err instanceof ConcurrencyConflictError) {
+          ctx.ui.notify(
+            `Settings were modified externally in ${err.scope} scope. Reloaded latest values.`,
+            "error",
+          );
+          currentLoaded = await store.load({ trustedProject: currentLoaded.trustedProject });
+          draft = cloneValue(currentLoaded.effective);
+        } else {
+          const message = err instanceof Error ? err.message : String(err);
+          ctx.ui.notify(`Failed to clear session overrides: ${message}`, "error");
+        }
+      }
+      continue;
+    }
+
     if (action.kind === "restore") {
       const confirmed = await ctx.ui.confirm(
         "Restore defaults",
@@ -1300,7 +1438,7 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
         continue;
       }
 
-      if (saveMode === "immediate") {
+      if (saveMode === "immediate" || saveMode === "session-draft") {
         try {
           const restoreResult = await store.restoreDefaults({
             scope,
@@ -1352,7 +1490,7 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
         schema,
         key,
         def,
-        scope,
+        editScope,
         currentLoaded.trustedProject,
         fieldLabel,
       );
@@ -1574,6 +1712,8 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
 
       if (saveMode === "immediate") {
         await persistValues(nextDraft);
+      } else if (saveMode === "session-draft") {
+        await persistValues(nextDraft, "session");
       } else {
         draft = nextDraft;
       }

@@ -12,6 +12,8 @@ import {
 } from "../schema/index.js";
 import { stripSecretKeys } from "./fs-hardening.js";
 import { createJsonFileStorageAdapter } from "./json-adapter.js";
+import { createLayeredStorageAdapter } from "./layered-adapter.js";
+import { createSessionStorageAdapter } from "./session-adapter.js";
 import {
   ConcurrencyConflictError,
   SettingsSecurityError,
@@ -31,12 +33,34 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
 
   constructor(schema: SettingsSchema<TFields>, options?: SettingsStoreOptions) {
     this.schema = schema;
-    this.adapter =
-      options?.adapter ?? createJsonFileStorageAdapter(schema, options);
+    if (options?.adapter) {
+      this.adapter = options.adapter;
+    } else {
+      const jsonAdapter = createJsonFileStorageAdapter(schema, options);
+      if (options?.sessionAdapter || options?.session) {
+        const sessionAdapter =
+          options.sessionAdapter ??
+          createSessionStorageAdapter({ ...options.session!, scope: "session" });
+        this.adapter = createLayeredStorageAdapter({
+          global: jsonAdapter,
+          project: jsonAdapter,
+          session: sessionAdapter,
+        });
+      } else {
+        this.adapter = jsonAdapter;
+      }
+    }
   }
 
   getPaths(): Partial<Record<SettingsScope, string>> {
-    return this.adapter.getPaths?.() ?? {};
+    const raw = this.adapter.getPaths?.() ?? {};
+    const out: Partial<Record<SettingsScope, string>> = {};
+    for (const scope of this.schema.scopes) {
+      if (raw[scope] !== undefined) {
+        out[scope] = raw[scope];
+      }
+    }
+    return out;
   }
 
   async load(
@@ -46,6 +70,7 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
     const trustedProject = Boolean(options?.trustedProject);
     const supportsGlobal = this.schema.scopes.includes("global");
     const supportsProject = this.schema.scopes.includes("project");
+    const supportsSession = this.schema.scopes.includes("session");
     const includeProject = supportsProject && trustedProject;
 
     const globalRead: LayerReadResult = supportsGlobal
@@ -56,10 +81,15 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
       ? await this.adapter.readLayer("project")
       : { data: null, hash: null, exists: false };
 
+    const sessionRead: LayerReadResult = supportsSession
+      ? await this.adapter.readLayer("session")
+      : { data: null, hash: null, exists: false };
+
     const warnings: string[] = [];
     const rejectedKeys: Record<SettingsScope, string[]> = {
       global: [],
       project: [],
+      session: [],
     };
     const migratedScopes: SettingsScope[] = [];
 
@@ -117,12 +147,20 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
     const layers: SettingsLayersData<TValues> = {
       global: parseLayer(globalRead, "global"),
       project: parseLayer(projectRead, "project"),
+      ...(supportsSession ? { session: parseLayer(sessionRead, "session") } : {}),
     };
 
-    const effective = this.schema.resolveEffective(layers, { includeProject });
-    const provenance = this.schema.computeProvenance(layers, { includeProject });
+    const effective = this.schema.resolveEffective(layers, {
+      includeProject,
+      includeSession: supportsSession,
+    });
+    const provenance = this.schema.computeProvenance(layers, {
+      includeProject,
+      includeSession: supportsSession,
+    });
     let globalHash = globalRead.hash;
     let projectHash = projectRead.hash;
+    let sessionHash = sessionRead.hash;
 
     if (options?.persistMigration === true && migratedScopes.length > 0) {
       for (const scope of migratedScopes) {
@@ -131,8 +169,10 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
         }
         const effectiveForScope =
           scope === "global"
-            ? this.schema.resolveEffective(layers, { includeProject: false })
-            : this.schema.resolveEffective(layers, { includeProject: true });
+            ? this.schema.resolveEffective(layers, { includeProject: false, includeSession: false })
+            : scope === "project"
+              ? this.schema.resolveEffective(layers, { includeProject: true, includeSession: false })
+              : this.schema.resolveEffective(layers, { includeProject, includeSession: true });
         const rawDiff = this.schema.diffForScope(effectiveForScope, scope, layers);
         const diff: Record<string, unknown> = {};
         for (const key of Object.keys(rawDiff) as PersistedFieldKeys<TFields>[]) {
@@ -150,15 +190,18 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
           continue;
         }
 
-        const expectedHash = scope === "global" ? globalHash : projectHash;
+        const expectedHash =
+          scope === "global" ? globalHash : scope === "project" ? projectHash : sessionHash;
         try {
           const writeResult = await this.adapter.writeLayer(scope, diff, {
             expectedHash,
           });
           if (scope === "global") {
             globalHash = writeResult.hash;
-          } else {
+          } else if (scope === "project") {
             projectHash = writeResult.hash;
+          } else {
+            sessionHash = writeResult.hash;
           }
         } catch (err) {
           if (err instanceof ConcurrencyConflictError) {
@@ -175,6 +218,7 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
     const snapshot: LayersSnapshot = {
       globalHash,
       projectHash,
+      ...(supportsSession ? { sessionHash } : {}),
     };
 
     return {
@@ -244,7 +288,9 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
     const currentHash =
       scope === "global"
         ? current.snapshot.globalHash
-        : current.snapshot.projectHash;
+        : scope === "project"
+          ? current.snapshot.projectHash
+          : (current.snapshot.sessionHash ?? null);
     const expectedHash = force ? undefined : currentHash;
 
     const writeResult = await this.adapter.writeLayer(scope, diff, { expectedHash });
@@ -284,8 +330,10 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
 
     const baseValues =
       scope === "global"
-        ? this.schema.resolveEffective(current.layers, { includeProject: false })
-        : cloneValue(current.effective);
+        ? this.schema.resolveEffective(current.layers, { includeProject: false, includeSession: false })
+        : scope === "project"
+          ? this.schema.resolveEffective(current.layers, { includeProject: true, includeSession: false })
+          : cloneValue(current.effective);
     const nextValues = baseValues as TValues;
     for (const [key, rawValue] of Object.entries(partial)) {
       if (!Object.prototype.hasOwnProperty.call(this.schema.fields, key)) {
@@ -331,7 +379,9 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
     const currentHash =
       scope === "global"
         ? current.snapshot.globalHash
-        : current.snapshot.projectHash;
+        : scope === "project"
+          ? current.snapshot.projectHash
+          : (current.snapshot.sessionHash ?? null);
     const expectedHash = force ? undefined : currentHash;
 
     let deletedFile = false;
@@ -374,10 +424,21 @@ export class SettingsStore<TFields extends FieldMap = FieldMap> {
     if (force || expectedSnapshot === undefined) {
       return;
     }
+    if (scope === "session" && expectedSnapshot.sessionHash === undefined) {
+      return;
+    }
     const expectedHash =
-      scope === "global" ? expectedSnapshot.globalHash : expectedSnapshot.projectHash;
+      scope === "global"
+        ? expectedSnapshot.globalHash
+        : scope === "project"
+          ? expectedSnapshot.projectHash
+          : (expectedSnapshot.sessionHash ?? null);
     const currentHash =
-      scope === "global" ? currentSnapshot.globalHash : currentSnapshot.projectHash;
+      scope === "global"
+        ? currentSnapshot.globalHash
+        : scope === "project"
+          ? currentSnapshot.projectHash
+          : (currentSnapshot.sessionHash ?? null);
     if (expectedHash !== currentHash) {
       throw new ConcurrencyConflictError(scope);
     }

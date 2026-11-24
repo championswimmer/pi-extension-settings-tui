@@ -4,6 +4,7 @@ import type {
   SettingsScope,
   StoragePathConfig,
 } from "../schema/index.js";
+import type { SessionStorageOptions } from "./session-adapter.js";
 
 export class ConcurrencyConflictError extends Error {
   readonly code = "CONCURRENCY_CONFLICT" as const;
@@ -70,6 +71,7 @@ export interface StorageAdapter {
 export interface LayersSnapshot {
   readonly globalHash: string | null;
   readonly projectHash: string | null;
+  readonly sessionHash?: string | null;
 }
 
 export interface LoadedSettings<TValues extends Record<string, unknown>> {
@@ -114,6 +116,15 @@ export interface JsonFileStorageOptions {
   readonly maxBytes?: number;
 }
 
+export interface LayeredStorageAdapterOptions {
+  readonly global?: StorageAdapter;
+  readonly project?: StorageAdapter;
+  readonly session?: StorageAdapter;
+  readonly fallback?: StorageAdapter;
+}
+
 export interface SettingsStoreOptions extends JsonFileStorageOptions {
   readonly adapter?: StorageAdapter;
+  readonly sessionAdapter?: StorageAdapter;
+  readonly session?: Omit<SessionStorageOptions, "scope">;
 }

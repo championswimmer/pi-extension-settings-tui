@@ -19,7 +19,7 @@ export function createMemoryStorageAdapter(
   const layers = new Map<SettingsScope, StoredMemoryLayer>();
 
   if (initial) {
-    for (const scope of ["global", "project"] as const) {
+    for (const scope of ["global", "project", "session"] as const) {
       const value = initial[scope];
       if (value !== undefined) {
         if (!isPlainRecord(value)) {
@@ -40,6 +40,7 @@ export function createMemoryStorageAdapter(
       return {
         global: "memory://global",
         project: "memory://project",
+        session: "memory://session",
       };
     },
 

@@ -4,6 +4,7 @@ export {
   type JsonFileStorageOptions,
   type LayerReadResult,
   type LayerWriteResult,
+  type LayeredStorageAdapterOptions,
   type LayersSnapshot,
   type LoadSettingsOptions,
   type LoadedSettings,
@@ -39,4 +40,5 @@ export {
   type SessionStorageOptions,
 } from "./session-adapter.js";
 export { createMemoryStorageAdapter } from "./memory-adapter.js";
+export { createLayeredStorageAdapter } from "./layered-adapter.js";
 export { SettingsStore, createSettingsStore } from "./settings-store.js";

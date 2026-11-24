@@ -724,12 +724,16 @@ test("Subpath exports expose all expected symbols across root, /schema, /store, 
   assert.equal(typeof schemaPkg.parseModelIdentity, "function");
   assert.equal(typeof schemaPkg.formatModelIdentity, "function");
   assert.equal(typeof schemaPkg.getSupportedThinkingLevelsForModel, "function");
+  assert.equal(typeof schemaPkg.parseFieldProvenance, "function");
+  assert.equal(schemaPkg.parseFieldProvenance, rootPkg.parseFieldProvenance);
   assert.ok(Array.isArray(schemaPkg.MODEL_THINKING_LEVELS));
 
   assert.equal(storePkg.createSettingsStore, rootPkg.createSettingsStore);
   assert.equal(storePkg.ConcurrencyConflictError, ConcurrencyConflictError);
   assert.equal(typeof storePkg.createJsonFileStorageAdapter, "function");
   assert.equal(typeof storePkg.createSessionStorageAdapter, "function");
+  assert.equal(typeof storePkg.createLayeredStorageAdapter, "function");
+  assert.equal(storePkg.createLayeredStorageAdapter, rootPkg.createLayeredStorageAdapter);
 
   assert.equal(dialogPkg.SettingsDialogComponent, rootPkg.SettingsDialogComponent);
   assert.equal(typeof dialogPkg.ConfirmRoute, "function");
@@ -1413,4 +1417,128 @@ test("RPC mode handles dynamic labels, ineligible rows, out-of-scope rows, view,
   assert.ok(notifications.some((n) => n.type === "warning" && n.message === "Enable Master Enabled to edit Count."));
   assert.ok(notifications.some((n) => n.type === "warning" && n.message.includes("Switch Save scope to Project")));
   assert.ok(notifications.some((n) => n.type === "warning" && n.message.includes("Switch Save scope to Global")));
+});
+
+test("openSettingsDialog supports session option, external signal abort, and RPC session-draft flow", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-settings-adapter-session-"));
+  const agentDir = path.join(tmp, "agent");
+  const cwd = path.join(tmp, "project");
+  fs.mkdirSync(agentDir, { recursive: true });
+  fs.mkdirSync(cwd, { recursive: true });
+
+  const entries = [];
+  const schema = defineSettings({
+    id: "adapter-session-draft",
+    title: "Adapter Session Draft",
+    settingsFile: "adapter-session.json",
+    scopes: ["global", "project", "session"],
+    defaultScope: "global",
+    saveMode: "session-draft",
+    fields: {
+      maxOpen: field.integer({ label: "Max open", default: 8, min: 1, max: 64 }),
+    },
+  });
+
+  const sessionOpts = {
+    entryType: "adapter:session:v1",
+    appendEntry: (type, data) => entries.push({ type: "custom", customType: type, data }),
+    getEntries: () => entries,
+  };
+
+  try {
+    // 1. External options.signal aborts an open TUI overlay cleanly
+    const externalController = new AbortController();
+    let resolveCustom;
+    const { ctx: tuiCtx } = createBaseContext({
+      mode: "tui",
+      hasUI: true,
+      cwd,
+      ui: {
+        theme: createMockTheme(),
+        notify: () => {},
+        select: async () => undefined,
+        confirm: async () => false,
+        input: async () => undefined,
+        editor: async () => undefined,
+        custom: (factory) =>
+          new Promise((resolve) => {
+            resolveCustom = resolve;
+            factory(createMockTui(), createMockTheme(), createMockKeybindings(), resolve);
+          }),
+      },
+    });
+
+    const pendingTui = openSettingsDialog(tuiCtx, {
+      schema,
+      agentDir,
+      cwd,
+      session: sessionOpts,
+      signal: externalController.signal,
+    });
+    await new Promise((r) => setTimeout(r, 15));
+    externalController.abort();
+    const tuiRes = await pendingTui;
+    assert.equal(tuiRes.closedBy, "abort");
+
+    // 2. RPC mode in session-draft: live edit saves to session, then "Save to Global*" persists global & prunes session
+    const selectQueue = [
+      (opts) => {
+        assert.ok(opts.some((o) => o.includes("Max open: 8 [default]")));
+        assert.ok(opts.some((o) => o === "Save to Global"));
+        assert.ok(opts.some((o) => o === "Done"));
+        return opts.find((o) => o.includes("Max open:"));
+      },
+      (opts) => {
+        assert.ok(opts.some((o) => o.includes("Max open: 4 [S]")));
+        assert.ok(opts.some((o) => o === "Reset session"));
+        assert.ok(opts.some((o) => o === "Save to Global*"));
+        return "Save to Global*";
+      },
+    ];
+    const applied = [];
+    const { ctx: rpcCtx } = createBaseContext({
+      mode: "rpc",
+      hasUI: true,
+      cwd,
+      ui: {
+        theme: createMockTheme(),
+        notify: () => {},
+        select: async (_title, opts) => {
+          const fn = selectQueue.shift();
+          assert.ok(fn, `Unexpected select: ${_title}`);
+          return fn(opts);
+        },
+        input: async () => "4",
+        editor: async () => undefined,
+        confirm: async () => true,
+        custom: async () => {
+          throw new Error("unexpected custom");
+        },
+      },
+    });
+
+    const rpcRes = await openSettingsDialog(rpcCtx, {
+      schema,
+      agentDir,
+      cwd,
+      session: sessionOpts,
+      onApply: (next, meta) => applied.push({ next, meta }),
+    });
+    assert.equal(selectQueue.length, 0);
+    assert.equal(rpcRes.saved, true);
+    assert.equal(rpcRes.closedBy, "save");
+    assert.equal(rpcRes.scope, "global");
+    assert.equal(rpcRes.values.maxOpen, 4);
+    assert.equal(applied.length, 2);
+    assert.equal(applied[0].meta.scope, "session");
+    assert.equal(applied[1].meta.scope, "global");
+    assert.equal(applied[1].meta.provenance.maxOpen, "global");
+
+    const globalJson = JSON.parse(fs.readFileSync(path.join(agentDir, "adapter-session.json"), "utf8"));
+    assert.deepEqual(globalJson, { maxOpen: 4 });
+    // Redundant session override was pruned via tombstone
+    assert.equal(entries.at(-1).data.__deleted, true);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });

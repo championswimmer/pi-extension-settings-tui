@@ -111,6 +111,13 @@ export function resolveScopeFilePath<TFields extends FieldMap>(
   scope: SettingsScope,
   options?: JsonFileStorageOptions,
 ): string {
+  if (scope === "session") {
+    throw new SettingsSecurityError(
+      "INVALID_PATH",
+      'JSON file storage adapter does not resolve file paths for "session" scope.',
+      { scope },
+    );
+  }
   const agentDir = path.resolve(options?.agentDir ?? resolveDefaultAgentDir());
   const cwd = path.resolve(options?.cwd ?? process.cwd());
   const effectiveSettingsFile =
@@ -231,6 +238,9 @@ export function createJsonFileStorageAdapter<TFields extends FieldMap>(
     },
 
     async readLayer(scope: SettingsScope): Promise<LayerReadResult> {
+      if (scope === "session") {
+        return { data: null, hash: null, exists: false };
+      }
       const { filePath, baseRoot } = getFileInfo(scope);
       const res = readJsonFileHardened(filePath, { baseRoot, maxBytes });
       return {
@@ -245,6 +255,11 @@ export function createJsonFileStorageAdapter<TFields extends FieldMap>(
       data: Record<string, unknown>,
       writeOptions?: { expectedHash?: string | null },
     ): Promise<LayerWriteResult> {
+      if (scope === "session") {
+        throw new Error(
+          'JSON file storage adapter cannot write "session" scope. Provide options.session, options.sessionAdapter, or a custom StorageAdapter.',
+        );
+      }
       const { filePath, baseRoot } = getFileInfo(scope);
       assertExpectedHash(scope, filePath, baseRoot, writeOptions?.expectedHash);
 
@@ -261,6 +276,11 @@ export function createJsonFileStorageAdapter<TFields extends FieldMap>(
       scope: SettingsScope,
       deleteOptions?: { expectedHash?: string | null },
     ): Promise<void> {
+      if (scope === "session") {
+        throw new Error(
+          'JSON file storage adapter cannot delete "session" scope. Provide options.session, options.sessionAdapter, or a custom StorageAdapter.',
+        );
+      }
       const { filePath, baseRoot } = getFileInfo(scope);
       assertExpectedHash(scope, filePath, baseRoot, deleteOptions?.expectedHash);
       deleteFileHardened(filePath, baseRoot);

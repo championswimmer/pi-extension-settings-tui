@@ -188,6 +188,32 @@ function getDefaultFieldTone(def: PersistedFieldDef, value: unknown): ValueTone 
   }
 }
 
+export function parseFieldProvenance(provenance: FieldProvenance): {
+  readonly global: boolean;
+  readonly project: boolean;
+  readonly session: boolean;
+} {
+  switch (provenance) {
+    case "global":
+      return { global: true, project: false, session: false };
+    case "project":
+      return { global: false, project: true, session: false };
+    case "both":
+      return { global: true, project: true, session: false };
+    case "session":
+      return { global: false, project: false, session: true };
+    case "global+session":
+      return { global: true, project: false, session: true };
+    case "project+session":
+      return { global: false, project: true, session: true };
+    case "all":
+      return { global: true, project: true, session: true };
+    case "default":
+    default:
+      return { global: false, project: false, session: false };
+  }
+}
+
 export function defineSettings<TFields extends FieldMap>(
   config: SettingsSchemaConfig<TFields>,
 ): SettingsSchema<TFields> {
@@ -212,6 +238,18 @@ export function defineSettings<TFields extends FieldMap>(
   }
 
   const saveMode: SaveMode = config.saveMode ?? "draft";
+  if (saveMode === "session-draft") {
+    if (!scopes.includes("session")) {
+      throw new Error(
+        `saveMode "session-draft" requires "session" to be included in scopes for schema "${config.id}"`,
+      );
+    }
+    if (!scopes.some((s) => s !== "session")) {
+      throw new Error(
+        `saveMode "session-draft" requires at least one persistent scope ("global" or "project") for schema "${config.id}"`,
+      );
+    }
+  }
   const settingsFile = config.settingsFile ?? config.storage?.settingsFile;
   const storage: StoragePathConfig =
     settingsFile !== undefined
@@ -317,9 +355,11 @@ export function defineSettings<TFields extends FieldMap>(
 
     resolveEffective(
       layers: SettingsLayersData<InferSettingsValues<TFields>>,
-      options?: { includeProject?: boolean },
+      options?: { includeProject?: boolean; includeSession?: boolean },
     ): InferSettingsValues<TFields> {
       const includeProject = options?.includeProject ?? true;
+      const includeSession = options?.includeSession ?? true;
+      const sessionLayer = layers.session;
       const result: Record<string, unknown> = {};
 
       for (const key of persistedFieldKeys) {
@@ -337,6 +377,14 @@ export function defineSettings<TFields extends FieldMap>(
         ) {
           value = layers.project[key] as InferSettingsValues<TFields>[typeof key];
         }
+        if (
+          includeSession &&
+          sessionLayer &&
+          Object.prototype.hasOwnProperty.call(sessionLayer, key) &&
+          sessionLayer[key] !== undefined
+        ) {
+          value = sessionLayer[key] as InferSettingsValues<TFields>[typeof key];
+        }
         result[key] = cloneValue(value);
       }
 
@@ -345,9 +393,11 @@ export function defineSettings<TFields extends FieldMap>(
 
     computeProvenance(
       layers: SettingsLayersData<InferSettingsValues<TFields>>,
-      options?: { includeProject?: boolean },
+      options?: { includeProject?: boolean; includeSession?: boolean },
     ): Record<PersistedFieldKeys<TFields>, FieldProvenance> {
       const includeProject = options?.includeProject ?? true;
+      const includeSession = options?.includeSession ?? true;
+      const sessionLayer = layers.session;
       const result: Record<string, FieldProvenance> = {};
 
       for (const key of persistedFieldKeys) {
@@ -358,8 +408,23 @@ export function defineSettings<TFields extends FieldMap>(
           includeProject &&
           Object.prototype.hasOwnProperty.call(layers.project, key) &&
           layers.project[key] !== undefined;
+        const inSession =
+          includeSession &&
+          Boolean(
+            sessionLayer &&
+              Object.prototype.hasOwnProperty.call(sessionLayer, key) &&
+              sessionLayer[key] !== undefined,
+          );
 
-        if (inGlobal && inProject) {
+        if (inGlobal && inProject && inSession) {
+          result[key] = "all";
+        } else if (inProject && inSession) {
+          result[key] = "project+session";
+        } else if (inGlobal && inSession) {
+          result[key] = "global+session";
+        } else if (inSession) {
+          result[key] = "session";
+        } else if (inGlobal && inProject) {
           result[key] = "both";
         } else if (inGlobal) {
           result[key] = "global";
@@ -392,11 +457,26 @@ export function defineSettings<TFields extends FieldMap>(
           if (!isEqual(nextVal, defaults[key])) {
             diff[key] = cloneValue(nextVal);
           }
-        } else {
+        } else if (scope === "project") {
           const hasGlobal =
             Object.prototype.hasOwnProperty.call(existingLayers.global, key) &&
             existingLayers.global[key] !== undefined;
           const baseVal = hasGlobal ? existingLayers.global[key] : defaults[key];
+          if (!isEqual(nextVal, baseVal)) {
+            diff[key] = cloneValue(nextVal);
+          }
+        } else {
+          const hasProject =
+            Object.prototype.hasOwnProperty.call(existingLayers.project, key) &&
+            existingLayers.project[key] !== undefined;
+          const hasGlobal =
+            Object.prototype.hasOwnProperty.call(existingLayers.global, key) &&
+            existingLayers.global[key] !== undefined;
+          const baseVal = hasProject
+            ? existingLayers.project[key]
+            : hasGlobal
+              ? existingLayers.global[key]
+              : defaults[key];
           if (!isEqual(nextVal, baseVal)) {
             diff[key] = cloneValue(nextVal);
           }

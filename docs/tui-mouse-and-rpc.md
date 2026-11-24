@@ -51,9 +51,9 @@ The callback in this example uses a schema with an `enabled` boolean. Return one
 
 ---
 
-## 2. Save Modes (`draft` vs `immediate`)
+## 2. Save Modes (`draft`, `immediate`, `session-draft`)
 
-Extensions configure `saveMode` either on the schema via `defineSettings({ saveMode: "draft" | "immediate", ... })` (defaults to `"draft"`) or per invocation via `openSettingsDialog(ctx, { schema, saveMode: "immediate" })` (and `SettingsDialogOptions.saveMode` when instantiating `SettingsDialogComponent` directly).
+Extensions configure `saveMode` either on the schema via `defineSettings({ saveMode: "draft" | "immediate" | "session-draft", ... })` (defaults to `"draft"`) or per invocation via `openSettingsDialog(ctx, { schema, saveMode: "immediate" })` (and `SettingsDialogOptions.saveMode` when instantiating `SettingsDialogComponent` directly).
 
 ### `saveMode: "draft"` (Default)
 - **In-memory draft holding:** Editing fields updates an in-memory draft only — **zero** writes hit the storage adapter and `onApply` is not invoked until the user explicitly saves.
@@ -69,6 +69,12 @@ Extensions configure `saveMode` either on the schema via `defineSettings({ saveM
 - **Serialized immediate auto-saving:** Every committed field edit triggers `store.save(...)` and `onApply` immediately without waiting for `Ctrl+S`.
 - **Rapid-edit race protection:** `SettingsDialogComponent` tracks a monotonic `draftVersion` on every field commit and serializes in-flight writes with `pendingImmediateSave`. If new edits arrive while an async `store.save(...)` is still in flight, the completing save updates `loadedState` and `baselineValues` without clobbering newer `draftValues`, and immediately flushes the latest draft in `finally` — preventing dropped edits or false `ConcurrencyConflictError` collisions.
 - **Auto-save UI cues:** The footer hint is prefixed with `Auto-save · ` (e.g. `Auto-save · Click/Enter edit · Tab tabs · Wheel scroll`), the `[Ctrl+S Save]` pill and `● Unsaved` badge are omitted, and closing via `Esc` / `[Esc Close]` returns `closedBy: "immediate"` with `saved: true` if any save succeeded.
+
+### `saveMode: "session-draft"`
+Requires `"session"` and at least one persistent scope (`"global"` or `"project"`) in `schema.scopes`.
+- **Live session auto-saving:** Every committed field edit immediately persists to `"session"` and triggers `onApply` without writing Global or Project files. The header shows `● Session` (or `● Session (N)`) in warning color, and `Esc` / `[Esc Close]` closes cleanly while keeping session overrides active.
+- **Promote to Global or Project (`Ctrl+S`):** Pressing `Ctrl+S` or clicking `[Ctrl+S Save]` persists the current values to the selected persistent scope (`Global` or trusted `Project`), prunes now-redundant session overrides, invokes `onApply`, and closes with `closedBy: "save"`.
+- **Reset session:** When session overrides exist, a `Reset session` row lets the user clear session-only overrides and revert to saved Global/Project values.
 
 ---
 
@@ -161,9 +167,10 @@ Extensions configure `saveMode` either on the schema via `defineSettings({ saveM
   3. It returns immediately with `{ mode: "tui", opened: false, reusedExisting: true, saved: false, closedBy: "reused", ... }` carrying the latest applied values and scope.
 
 ### `AbortSignal` Cleanup
-- If `ctx.signal` is already aborted before opening in TUI mode, `openSettingsDialog` skips opening the overlay and returns `{ opened: false, saved: false, closedBy: "abort", ... }`.
-- While the overlay is open, an `"abort"` listener on `ctx.signal` calls `component.abort()`, which disposes open sub-routes and closes the overlay cleanly with `closedBy: "abort"`.
-- A `finally` block always removes the signal listener and deletes the `schema.id` entry from the active-overlay registry.
+- Both `ctx.signal` and `options.signal` are combined when checking abort state.
+- If the signal is already aborted before opening in TUI mode, `openSettingsDialog` skips opening the overlay and returns `{ opened: false, saved: false, closedBy: "abort", ... }`.
+- While the overlay is open, an `"abort"` listener calls `component.abort()`, which disposes open sub-routes and closes the overlay cleanly with `closedBy: "abort"`.
+- A `finally` block always removes signal listeners and deletes the `schema.id` entry from the active-overlay registry.
 
 ### Automatic RPC Fallback (`ctx.mode === "rpc"`)
 When `ctx.mode === "rpc" && ctx.hasUI`, `openSettingsDialog` delegates to `runRpcSettingsMenu`:

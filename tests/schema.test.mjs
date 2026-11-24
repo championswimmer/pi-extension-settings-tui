@@ -11,6 +11,7 @@ import {
   formatModelIdentity,
   getSupportedThinkingLevelsForModel,
   isPersistedFieldDef,
+  parseFieldProvenance,
   parseModelIdentity,
   stripControlChars,
   validateFieldValue,
@@ -1234,4 +1235,113 @@ test("field.view, field.external, field.picker, isPersistedFieldDef, scope helpe
   });
   assert.equal(globalOnlySchema.isFieldAllowedInScope("flag", "global"), true);
   assert.equal(globalOnlySchema.isFieldAllowedInScope("flag", "project"), false);
+});
+
+test("3-layer (global + project + session) effective resolution, 8-state provenance, and session-draft validation", () => {
+  assert.throws(
+    () =>
+      defineSettings({
+        id: "missing-session",
+        title: "Missing Session",
+        scopes: ["global", "project"],
+        saveMode: "session-draft",
+        fields: { a: field.integer({ label: "A", default: 1 }) },
+      }),
+    /requires "session" to be included in scopes/,
+  );
+
+  assert.throws(
+    () =>
+      defineSettings({
+        id: "only-session",
+        title: "Only Session",
+        scopes: ["session"],
+        saveMode: "session-draft",
+        fields: { a: field.integer({ label: "A", default: 1 }) },
+      }),
+    /requires at least one persistent scope/,
+  );
+
+  const schema = defineSettings({
+    id: "three-layer",
+    title: "Three Layer",
+    scopes: ["global", "project", "session"],
+    defaultScope: "global",
+    saveMode: "session-draft",
+    fields: {
+      f0: field.integer({ label: "F0", default: 0 }),
+      fG: field.integer({ label: "FG", default: 0 }),
+      fP: field.integer({ label: "FP", default: 0 }),
+      fGP: field.integer({ label: "FGP", default: 0 }),
+      fS: field.integer({ label: "FS", default: 0 }),
+      fGS: field.integer({ label: "FGS", default: 0 }),
+      fPS: field.integer({ label: "FPS", default: 0 }),
+      fAll: field.integer({ label: "FAll", default: 0 }),
+    },
+  });
+
+  const layers = {
+    global: { fG: 1, fGP: 1, fGS: 1, fAll: 1 },
+    project: { fP: 2, fGP: 2, fPS: 2, fAll: 2 },
+    session: { fS: 3, fGS: 3, fPS: 3, fAll: 3 },
+  };
+
+  assert.deepEqual(schema.resolveEffective(layers), {
+    f0: 0,
+    fG: 1,
+    fP: 2,
+    fGP: 2,
+    fS: 3,
+    fGS: 3,
+    fPS: 3,
+    fAll: 3,
+  });
+  assert.deepEqual(schema.resolveEffective(layers, { includeProject: false }), {
+    f0: 0,
+    fG: 1,
+    fP: 0,
+    fGP: 1,
+    fS: 3,
+    fGS: 3,
+    fPS: 3,
+    fAll: 3,
+  });
+  assert.deepEqual(schema.resolveEffective(layers, { includeSession: false }), {
+    f0: 0,
+    fG: 1,
+    fP: 2,
+    fGP: 2,
+    fS: 0,
+    fGS: 1,
+    fPS: 2,
+    fAll: 2,
+  });
+
+  const provenance = schema.computeProvenance(layers);
+  assert.deepEqual(provenance, {
+    f0: "default",
+    fG: "global",
+    fP: "project",
+    fGP: "both",
+    fS: "session",
+    fGS: "global+session",
+    fPS: "project+session",
+    fAll: "all",
+  });
+
+  assert.deepEqual(parseFieldProvenance("default"), { global: false, project: false, session: false });
+  assert.deepEqual(parseFieldProvenance("global"), { global: true, project: false, session: false });
+  assert.deepEqual(parseFieldProvenance("project"), { global: false, project: true, session: false });
+  assert.deepEqual(parseFieldProvenance("both"), { global: true, project: true, session: false });
+  assert.deepEqual(parseFieldProvenance("session"), { global: false, project: false, session: true });
+  assert.deepEqual(parseFieldProvenance("global+session"), { global: true, project: false, session: true });
+  assert.deepEqual(parseFieldProvenance("project+session"), { global: false, project: true, session: true });
+  assert.deepEqual(parseFieldProvenance("all"), { global: true, project: true, session: true });
+
+  const nextValues = { f0: 0, fG: 1, fP: 2, fGP: 2, fS: 3, fGS: 1, fPS: 9, fAll: 1 };
+  assert.deepEqual(schema.diffForScope(nextValues, "session", layers), {
+    fS: 3,
+    fPS: 9,
+    fAll: 1,
+  });
 });

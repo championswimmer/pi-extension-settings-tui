@@ -57,6 +57,7 @@ pi-extension-settings-tui/
 │   │   ├── fs-hardening.ts            # Symlink segment checks, 0o700/0o600 atomic writes, 64 KiB cap
 │   │   ├── json-adapter.ts            # Default & custom path resolution, optimistic hash checks
 │   │   ├── session-adapter.ts         # pi.appendEntry / session entry persistence adapter
+│   │   ├── layered-adapter.ts         # Per-scope adapter composition (global + project + session)
 │   │   ├── memory-adapter.ts          # In-memory layered adapter for tests
 │   │   ├── settings-store.ts          # SettingsStore (load, save, patch, restoreDefaults)
 │   │   └── index.ts
@@ -122,7 +123,7 @@ pi-extension-settings-tui/
     - Global: `path.join(agentDir, schema.id, fileName)` (default `fileName` = `"settings.json"`).
     - Project: `path.join(cwd, ".pi", schema.id, fileName)`.
   - Explicit `globalPath` / `projectPath` overrides take precedence over `settingsFile` as an escape hatch for legacy asymmetric layouts.
-- Override-only persistence: `global` stores only diffs from defaults; `project` stores only diffs from `global ?? defaults`. Empty diffs delete the layer file when `deleteWhenEmpty !== false`.
+- Override-only persistence: `global` stores only diffs from defaults; `project` stores only diffs from `global ?? defaults`; `session` stores only diffs from `project ?? global ?? defaults`. Empty diffs delete the layer file when `deleteWhenEmpty !== false` (or append a tombstone in `session-adapter`). `saveMode: "session-draft"` auto-saves field edits to `"session"` while `Ctrl+S` persists to the selected `"global"` or `"project"` scope and prunes redundant session overrides.
 - **macOS `/var` & `/tmp` symlink caveat**: `assertNoSymlinkSegments` resolves `baseRoot` via `realpathSync` first and checks segments strictly **below** `baseRoot` + the target file (`lstatSync` + `O_NOFOLLOW`) so macOS OS-level symlinks (`/tmp -> /private/tmp`, `/var -> /private/var`) do not false-fail while real symlinks inside the storage root are rejected.
 - Atomic writes: create parent dirs `0o700`, open `.settings.<uuid>.tmp` with `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW` mode `0o600`, write UTF-8, `fsyncSync`, close, re-check target is not symlink, `renameSync`, clean up temp file in `finally`.
 - Enforce `MAX_SETTINGS_BYTES = 64 * 1024` on both read and write.

@@ -17,6 +17,7 @@ import {
   cloneValue,
   deepEqual,
   isPersistedFieldDef,
+  parseFieldProvenance,
   type AnyFieldDef,
   type EnumFieldDef,
   type ExternalFieldDef,
@@ -84,7 +85,34 @@ type RootRow<TFields extends FieldMap> =
     }
   | { readonly kind: "divider" }
   | { readonly kind: "scope"; readonly hardDisabled: false }
+  | { readonly kind: "resetSession"; readonly hardDisabled: false }
   | { readonly kind: "restore"; readonly hardDisabled: false };
+
+const ALL_SCOPE_SLOTS: readonly SettingsScope[] = ["global", "project", "session"];
+
+function getScopeDisplayName(scope: SettingsScope): string {
+  switch (scope) {
+    case "project":
+      return "Project";
+    case "session":
+      return "Session";
+    case "global":
+    default:
+      return "Global";
+  }
+}
+
+function getScopeColor(scope: SettingsScope): "accent" | "success" | "warning" {
+  switch (scope) {
+    case "project":
+      return "success";
+    case "session":
+      return "warning";
+    case "global":
+    default:
+      return "accent";
+  }
+}
 
 interface StatusBanner {
   readonly text: string;
@@ -235,6 +263,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
   private conflictError = false;
   private isSaving = false;
   private pendingImmediateSave = false;
+  private pendingPersistentSave = false;
   private draftVersion = 0;
   private everSavedImmediate = false;
   private closed = false;
@@ -275,15 +304,35 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     }
   }
 
+  private getScopeSlots(): readonly SettingsScope[] {
+    return ALL_SCOPE_SLOTS.filter((s) => this.options.schema.scopes.includes(s));
+  }
+
+  private getSelectableSaveScopes(): readonly SettingsScope[] {
+    const { scopes } = this.options.schema;
+    return this.saveMode === "session-draft"
+      ? scopes.filter((s) => s !== "session")
+      : scopes;
+  }
+
+  private getSessionOverrideCount(): number {
+    return Object.keys(this.loadedState.layers.session ?? {}).length;
+  }
+
+  private hasSessionOverrides(): boolean {
+    return this.getSessionOverrideCount() > 0;
+  }
+
   private resolveInitialScope(): SettingsScope {
     const { schema, initialState } = this.options;
-    if (!initialState.trustedProject && schema.scopes.includes("global")) {
+    const selectable = this.getSelectableSaveScopes();
+    if (!initialState.trustedProject && selectable.includes("global")) {
       return "global";
     }
-    if (schema.scopes.includes(schema.defaultScope)) {
+    if (selectable.includes(schema.defaultScope)) {
       return schema.defaultScope;
     }
-    return schema.scopes[0] ?? "global";
+    return selectable[0] ?? "global";
   }
 
   private resolveInitialTab(tabId?: string): string {
@@ -362,10 +411,13 @@ export class SettingsDialogComponent<TFields extends FieldMap>
   /** Abort the dialog cleanly without saving (`closedBy: "abort"`). */
   abort(): void {
     this.finish({
-      saved: this.saveMode === "immediate" ? this.everSavedImmediate : false,
+      saved:
+        this.saveMode === "immediate" || this.saveMode === "session-draft"
+          ? this.everSavedImmediate
+          : false,
       values: cloneValue(this.baselineValues),
       scope: this.activeScope,
-      dirty: this.isDirty(),
+      dirty: this.saveMode === "draft" ? this.isDirty() : false,
       closedBy: "abort",
     });
   }
@@ -451,7 +503,8 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     | { readonly allowed: true }
     | { readonly allowed: false; readonly tag: string; readonly reason: string } {
     const { schema } = this.options;
-    if (schema.isFieldAllowedInScope(key, this.activeScope)) {
+    const editScope = this.saveMode === "session-draft" ? "session" : this.activeScope;
+    if (schema.isFieldAllowedInScope(key, editScope)) {
       return { allowed: true };
     }
     const allowedScopes = (def.scopes ?? schema.scopes).filter((s) => schema.scopes.includes(s));
@@ -471,11 +524,18 @@ export class SettingsDialogComponent<TFields extends FieldMap>
           : "Project-only setting. This project is not trusted, so Project scope is locked.",
       };
     }
+    if (allowedScopes.length === 1 && allowedScopes[0] === "session") {
+      return {
+        allowed: false,
+        tag: "[Session only]",
+        reason: "Session-only setting. Switch Save scope to Session to edit.",
+      };
+    }
     const label = schema.getFieldLabel(key, this.draftValues);
     return {
       allowed: false,
       tag: "[Unavailable]",
-      reason: `${label} cannot be edited in ${this.activeScope} scope.`,
+      reason: `${label} cannot be edited in ${editScope} scope.`,
     };
   }
 
@@ -508,8 +568,11 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       rows.push({ kind: "divider" });
     }
 
-    if (schema.scopes.length > 1) {
+    if (this.getSelectableSaveScopes().length > 1) {
       rows.push({ kind: "scope", hardDisabled: false });
+    }
+    if (this.saveMode === "session-draft" && this.hasSessionOverrides()) {
+      rows.push({ kind: "resetSession", hardDisabled: false });
     }
     rows.push({ kind: "restore", hardDisabled: false });
 
@@ -569,18 +632,15 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     return tab?.label ?? this.activeTabId;
   }
 
-  private renderProvenanceCells(provenance: FieldProvenance, theme: Theme): string {
-    switch (provenance) {
-      case "global":
-        return `${theme.fg("accent", "●")}  `;
-      case "project":
-        return `  ${theme.fg("success", "●")}`;
-      case "both":
-        return `${theme.fg("accent", "●")} ${theme.fg("success", "●")}`;
-      case "default":
-      default:
-        return "   ";
-    }
+  private renderProvenanceCells(
+    provenance: FieldProvenance,
+    scopeSlots: readonly SettingsScope[],
+    theme: Theme,
+  ): string {
+    const flags = parseFieldProvenance(provenance);
+    return scopeSlots
+      .map((slot) => (flags[slot] ? theme.fg(getScopeColor(slot), "●") : " "))
+      .join(" ");
   }
 
   private getHeightBudget(): number {
@@ -627,9 +687,16 @@ export class SettingsDialogComponent<TFields extends FieldMap>
           theme.fg("warning", dirtyCount > 1 ? `● Unsaved (${dirtyCount})` : "● Unsaved"),
         );
       }
+    } else if (this.saveMode === "session-draft") {
+      const sessionCount = this.getSessionOverrideCount();
+      if (sessionCount > 0) {
+        rightParts.push(
+          theme.fg("warning", sessionCount > 1 ? `● Session (${sessionCount})` : "● Session"),
+        );
+      }
     }
-    const scopeLabel = this.activeScope === "project" ? "Project" : "Global";
-    const scopeColor = this.activeScope === "project" ? "success" : "accent";
+    const scopeLabel = getScopeDisplayName(this.activeScope);
+    const scopeColor = getScopeColor(this.activeScope);
     rightParts.push(theme.fg(scopeColor, `[${scopeLabel}]`));
 
     const right = rightParts.join(" ");
@@ -714,7 +781,8 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     this.alignSelection(rows);
 
     const hasTabs = schema.tabs.length > 1;
-    const isMultiScope = schema.scopes.length > 1;
+    const scopeSlots = this.getScopeSlots();
+    const isMultiScope = scopeSlots.length > 1;
     const showDivider = maxLines >= 10;
     const showLegend = isMultiScope && maxLines >= 12;
 
@@ -806,7 +874,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
         });
       }
 
-      const renderedRow = this.renderRootRow(row, isSelected, innerWidth, isMultiScope);
+      const renderedRow = this.renderRootRow(row, isSelected, innerWidth, scopeSlots);
       const padded = fitToWidth(renderedRow, innerWidth);
       lines.push(
         renderBoxLine(isSelected ? theme.bg("selectedBg", padded) : padded, safeWidth, theme),
@@ -842,7 +910,15 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     }
 
     if (showLegend && lines.length + 2 < maxLines) {
-      const legend = `${theme.fg("dim", "Saved:")} ${theme.fg("accent", "●")} ${theme.fg("muted", "Global")} ${theme.fg("dim", "·")} ${theme.fg("success", "●")} ${theme.fg("muted", "Project")} ${theme.fg("dim", "·")} ${theme.fg("accent", "●")} ${theme.fg("success", "●")} ${theme.fg("muted", "Both")}`;
+      let legend: string;
+      if (scopeSlots.length === 2 && scopeSlots[0] === "global" && scopeSlots[1] === "project") {
+        legend = `${theme.fg("dim", "Saved:")} ${theme.fg("accent", "●")} ${theme.fg("muted", "Global")} ${theme.fg("dim", "·")} ${theme.fg("success", "●")} ${theme.fg("muted", "Project")} ${theme.fg("dim", "·")} ${theme.fg("accent", "●")} ${theme.fg("success", "●")} ${theme.fg("muted", "Both")}`;
+      } else {
+        const parts = scopeSlots.map(
+          (s) => `${theme.fg(getScopeColor(s), "●")} ${theme.fg("muted", getScopeDisplayName(s))}`,
+        );
+        legend = `${theme.fg("dim", "Saved:")} ${parts.join(` ${theme.fg("dim", "·")} `)}`;
+      }
       lines.push(renderBoxLine(legend, safeWidth, theme));
     }
 
@@ -970,9 +1046,11 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     row: Exclude<RootRow<TFields>, { kind: "divider" }>,
     isSelected: boolean,
     innerWidth: number,
-    isMultiScope: boolean,
+    scopeSlots: readonly SettingsScope[],
   ): string {
     const { schema, theme } = this.options;
+    const isMultiScope = scopeSlots.length > 1;
+    const emptyProv = " ".repeat(Math.max(1, scopeSlots.length * 2 - 1));
     const cursor = isSelected ? theme.fg("accent", "❯") : " ";
 
     if (row.kind === "scope") {
@@ -980,19 +1058,27 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       let valueText: string;
       if (this.activeScope === "project") {
         valueText = theme.fg("success", "Project");
-      } else if (!this.loadedState.trustedProject && schema.scopes.includes("project")) {
+      } else if (this.activeScope === "session") {
+        valueText = theme.fg("warning", "Session");
+      } else if (!this.loadedState.trustedProject && this.getSelectableSaveScopes().includes("project")) {
         valueText = `${theme.fg("accent", "Global")} ${theme.fg("dim", "(Project untrusted)")}`;
       } else {
         valueText = theme.fg("accent", "Global");
       }
-      return this.formatColumns(cursor, label, "   ", valueText, innerWidth, isMultiScope);
+      return this.formatColumns(cursor, label, emptyProv, valueText, innerWidth, isMultiScope);
+    }
+
+    if (row.kind === "resetSession") {
+      const label = theme.fg(isSelected ? "accent" : "text", "Reset session");
+      const valueText = theme.fg("warning", "Clear session…");
+      return this.formatColumns(cursor, label, emptyProv, valueText, innerWidth, isMultiScope);
     }
 
     if (row.kind === "restore") {
       const label = theme.fg(isSelected ? "accent" : "text", "Restore defaults");
-      const scopeName = this.activeScope === "project" ? "project" : "global";
+      const scopeName = getScopeDisplayName(this.activeScope).toLowerCase();
       const valueText = theme.fg("warning", `Reset ${scopeName}…`);
-      return this.formatColumns(cursor, label, "   ", valueText, innerWidth, isMultiScope);
+      return this.formatColumns(cursor, label, emptyProv, valueText, innerWidth, isMultiScope);
     }
 
     const { key, def, hardDisabled, eligible, allowedInScope, scopeTag } = row;
@@ -1036,9 +1122,9 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       if (isPersisted) {
         const persistedKey = key as PersistedFieldKeys<TFields>;
         const provenance = this.loadedState.provenance[persistedKey] ?? "default";
-        provCells = this.renderProvenanceCells(provenance, theme);
+        provCells = this.renderProvenanceCells(provenance, scopeSlots, theme);
       } else {
-        provCells = "   ";
+        provCells = emptyProv;
       }
     }
 
@@ -1108,9 +1194,13 @@ export class SettingsDialogComponent<TFields extends FieldMap>
         text = this.options.schema.getFieldDescription(selectedRow.key, this.draftValues) ?? "";
       }
     } else if (selectedRow?.kind === "scope") {
-      text = this.loadedState.trustedProject
-        ? "Choose whether edits write to your user-global file or this project."
-        : "Project scope is locked because this project is not trusted.";
+      text = !this.loadedState.trustedProject && this.getSelectableSaveScopes().includes("project")
+        ? "Project scope is locked because this project is not trusted."
+        : this.saveMode === "session-draft"
+          ? "Edits apply to this session immediately; Ctrl+S saves to the selected scope."
+          : "Choose whether edits write to your user-global file or this project.";
+    } else if (selectedRow?.kind === "resetSession") {
+      text = "Clear all session-level overrides and fall back to saved Global/Project values.";
     } else if (selectedRow?.kind === "restore") {
       text = `Remove all saved overrides in ${this.activeScope} scope.`;
     }
@@ -1156,6 +1246,21 @@ export class SettingsDialogComponent<TFields extends FieldMap>
         id: "discard",
         text: formatActionPill(dirty ? "Esc Discard" : "Esc Close", theme, { tone: "muted" }),
       });
+    } else if (this.saveMode === "session-draft") {
+      const hasSession = this.hasSessionOverrides();
+      pills.push({
+        kind: "action",
+        id: "save",
+        text: formatActionPill("Ctrl+S Save", theme, {
+          highlighted: hasSession,
+          tone: hasSession ? "accent" : "muted",
+        }),
+      });
+      pills.push({
+        kind: "action",
+        id: "close",
+        text: formatActionPill("Esc Close", theme, { tone: "muted" }),
+      });
     } else {
       pills.push({
         kind: "action",
@@ -1177,7 +1282,11 @@ export class SettingsDialogComponent<TFields extends FieldMap>
           : "↑/↓ move · Enter edit";
 
     const hintStr =
-      this.saveMode === "immediate" ? `Auto-save · ${baseHintStr}` : baseHintStr;
+      this.saveMode === "immediate"
+        ? `Auto-save · ${baseHintStr}`
+        : this.saveMode === "session-draft"
+          ? `Live session · ${baseHintStr}`
+          : baseHintStr;
 
     const clippedHint =
       hintBudget >= 10
@@ -1213,10 +1322,16 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       return;
     }
 
-    // Save shortcut in draft mode
-    if (this.saveMode === "draft" && matchesKey(data, Key.ctrl("s"))) {
-      void this.persistDraft(this.draftValues, true);
-      return;
+    // Save shortcut in draft / session-draft mode
+    if (matchesKey(data, Key.ctrl("s"))) {
+      if (this.saveMode === "draft") {
+        void this.persistDraft(this.draftValues, true);
+        return;
+      }
+      if (this.saveMode === "session-draft") {
+        void this.persistSessionDraftToActiveScope();
+        return;
+      }
     }
 
     // Escape / Cancel
@@ -1377,6 +1492,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
             target?.kind === "field" && (!target.allowedInScope || !target.eligible);
           const isImmediateClickRow =
             target?.kind === "scope" ||
+            target?.kind === "resetSession" ||
             target?.kind === "restore" ||
             isBlockedField ||
             (target?.kind === "field" && target.def.kind === "boolean");
@@ -1452,13 +1568,17 @@ export class SettingsDialogComponent<TFields extends FieldMap>
   private handleActionPill(actionId: string): void {
     switch (actionId) {
       case "save":
-        void this.persistDraft(this.draftValues, true);
+        if (this.saveMode === "session-draft") {
+          void this.persistSessionDraftToActiveScope();
+        } else {
+          void this.persistDraft(this.draftValues, true);
+        }
         break;
       case "discard":
         this.closeFromRoot(this.isDirty() ? "cancel" : "escape");
         break;
       case "close":
-        this.closeFromRoot("immediate");
+        this.closeFromRoot(this.saveMode === "session-draft" ? "escape" : "immediate");
         break;
       case "reload":
         void this.reloadFromDisk();
@@ -1477,6 +1597,17 @@ export class SettingsDialogComponent<TFields extends FieldMap>
         scope: this.activeScope,
         dirty: false,
         closedBy: "immediate",
+      });
+      return;
+    }
+
+    if (this.saveMode === "session-draft") {
+      this.finish({
+        saved: this.everSavedImmediate,
+        values: cloneValue(this.baselineValues),
+        scope: this.activeScope,
+        dirty: false,
+        closedBy: reason,
       });
       return;
     }
@@ -1510,11 +1641,11 @@ export class SettingsDialogComponent<TFields extends FieldMap>
   }
 
   private cycleScope(): void {
-    const { schema } = this.options;
-    if (schema.scopes.length <= 1) return;
+    const selectable = this.getSelectableSaveScopes();
+    if (selectable.length <= 1) return;
 
-    const currentIdx = Math.max(0, schema.scopes.indexOf(this.activeScope));
-    const nextScope = schema.scopes[(currentIdx + 1) % schema.scopes.length]!;
+    const currentIdx = Math.max(0, selectable.indexOf(this.activeScope));
+    const nextScope = selectable[(currentIdx + 1) % selectable.length]!;
 
     if (nextScope === "project" && !this.loadedState.trustedProject) {
       this.statusBanner = {
@@ -1526,7 +1657,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
 
     this.activeScope = nextScope;
     this.statusBanner = {
-      text: `Saving target set to ${nextScope === "project" ? "Project" : "Global"} scope.`,
+      text: `Saving target set to ${getScopeDisplayName(nextScope)} scope.`,
       tone: "info",
     };
   }
@@ -1603,6 +1734,11 @@ export class SettingsDialogComponent<TFields extends FieldMap>
 
     if (row.kind === "scope") {
       this.cycleScope();
+      return;
+    }
+
+    if (row.kind === "resetSession") {
+      this.openResetSessionConfirm();
       return;
     }
 
@@ -2153,15 +2289,44 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     }
   }
 
+  private openResetSessionConfirm(): void {
+    const frameAbort = new AbortController();
+    const route = new ConfirmRoute({
+      title: "Reset session",
+      message: "Clear session overrides?",
+      detail:
+        "This removes overrides saved only for this session and reverts to Global/Project/default values.",
+      confirmLabel: "Clear",
+      cancelLabel: "Cancel",
+      destructive: true,
+      defaultAction: "cancel",
+      theme: this.options.theme,
+      keybindings: this.options.keybindings,
+      getMaxHeight: () => this.lastSubrouteBodyBudget,
+      onConfirm: () => {
+        this.popRoute();
+        void this.performRestoreDefaults("session", "Cleared session overrides.");
+      },
+      onCancel: () => {
+        this.popRoute();
+      },
+    });
+    this.pushRoute("Reset session", route, frameAbort);
+  }
+
   private openRestoreDefaultsConfirm(): void {
-    const scopeName = this.activeScope === "project" ? "Project" : "Global";
+    const scopeName = getScopeDisplayName(this.activeScope);
+    const parentLabel =
+      this.activeScope === "project"
+        ? "global/default"
+        : this.activeScope === "session"
+          ? "project/global/default"
+          : "built-in default";
     const frameAbort = new AbortController();
     const route = new ConfirmRoute({
       title: "Restore defaults",
       message: `Restore defaults for ${scopeName} scope?`,
-      detail: `This removes saved ${scopeName.toLowerCase()} overrides and reverts to ${
-        this.activeScope === "project" ? "global/default" : "built-in default"
-      } values.`,
+      detail: `This removes saved ${scopeName.toLowerCase()} overrides and reverts to ${parentLabel} values.`,
       confirmLabel: "Restore",
       cancelLabel: "Cancel",
       destructive: true,
@@ -2171,7 +2336,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       getMaxHeight: () => this.lastSubrouteBodyBudget,
       onConfirm: () => {
         this.popRoute();
-        void this.performRestoreDefaults();
+        void this.performRestoreDefaults(this.activeScope);
       },
       onCancel: () => {
         this.popRoute();
@@ -2248,6 +2413,8 @@ export class SettingsDialogComponent<TFields extends FieldMap>
 
     if (this.saveMode === "immediate") {
       void this.persistDraft(updated, false);
+    } else if (this.saveMode === "session-draft") {
+      void this.persistDraft(updated, false, "session");
     }
   }
 
@@ -2332,6 +2499,8 @@ export class SettingsDialogComponent<TFields extends FieldMap>
 
     if (this.saveMode === "immediate") {
       void this.persistDraft(updated, false);
+    } else if (this.saveMode === "session-draft") {
+      void this.persistDraft(updated, false, "session");
     } else {
       this.options.tui.requestRender();
     }
@@ -2340,15 +2509,16 @@ export class SettingsDialogComponent<TFields extends FieldMap>
   private async persistDraft(
     nextValues: InferSettingsValues<TFields>,
     closeAfterSave: boolean,
+    targetScope: SettingsScope = this.activeScope,
   ): Promise<void> {
     if (this.closed) return;
     if (this.isSaving) {
-      if (this.saveMode === "immediate" && !closeAfterSave) {
+      if ((this.saveMode === "immediate" || this.saveMode === "session-draft") && !closeAfterSave) {
         this.pendingImmediateSave = true;
       }
       return;
     }
-    if (this.activeScope === "project" && !this.loadedState.trustedProject) {
+    if (targetScope === "project" && !this.loadedState.trustedProject) {
       this.statusBanner = {
         text: "Cannot save to Project scope: project is untrusted.",
         tone: "error",
@@ -2361,7 +2531,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
     const versionAtSaveStart = this.draftVersion;
     try {
       const result = await this.options.store.save(nextValues, {
-        scope: this.activeScope,
+        scope: targetScope,
         trustedProject: this.loadedState.trustedProject,
         expectedSnapshot: this.loadedState.snapshot,
       });
@@ -2374,12 +2544,12 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       this.conflictError = false;
       this.statusBanner = undefined;
 
-      if (this.saveMode === "immediate") {
+      if (this.saveMode === "immediate" || this.saveMode === "session-draft") {
         this.everSavedImmediate = true;
       }
 
       await this.options.onApply?.(cloneValue(result.loaded.effective), {
-        scope: this.activeScope,
+        scope: targetScope,
         provenance: result.loaded.provenance,
         writtenKeys: result.writtenKeys,
       });
@@ -2388,7 +2558,7 @@ export class SettingsDialogComponent<TFields extends FieldMap>
         this.finish({
           saved: true,
           values: cloneValue(result.loaded.effective),
-          scope: this.activeScope,
+          scope: targetScope,
           dirty: false,
           closedBy: "save",
         });
@@ -2411,21 +2581,119 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       this.options.tui.requestRender();
     } finally {
       this.isSaving = false;
+      if (this.pendingPersistentSave) {
+        this.pendingPersistentSave = false;
+        if (!this.closed && !this.conflictError && this.saveMode === "session-draft") {
+          void this.persistSessionDraftToActiveScope();
+          return;
+        }
+      }
       if (this.pendingImmediateSave) {
         this.pendingImmediateSave = false;
-        if (!this.closed && !this.conflictError && this.saveMode === "immediate") {
-          void this.persistDraft(this.draftValues, false);
+        if (
+          !this.closed &&
+          !this.conflictError &&
+          (this.saveMode === "immediate" || this.saveMode === "session-draft")
+        ) {
+          void this.persistDraft(
+            this.draftValues,
+            false,
+            this.saveMode === "session-draft" ? "session" : this.activeScope,
+          );
         }
       }
     }
   }
 
-  private async performRestoreDefaults(): Promise<void> {
+  private async persistSessionDraftToActiveScope(): Promise<void> {
+    if (this.closed) return;
+    if (this.isSaving) {
+      this.pendingPersistentSave = true;
+      return;
+    }
+    const targetScope = this.activeScope;
+    if (targetScope === "project" && !this.loadedState.trustedProject) {
+      this.statusBanner = {
+        text: "Cannot save to Project scope: project is untrusted.",
+        tone: "error",
+      };
+      this.options.tui.requestRender();
+      return;
+    }
+
+    this.isSaving = true;
+    const versionAtSaveStart = this.draftVersion;
+    try {
+      const valuesToSave = cloneValue(this.draftValues);
+      const result = await this.options.store.save(valuesToSave, {
+        scope: targetScope,
+        trustedProject: this.loadedState.trustedProject,
+        expectedSnapshot: this.loadedState.snapshot,
+      });
+
+      let finalLoaded = result.loaded;
+      if (
+        Object.keys(finalLoaded.layers.session ?? {}).length > 0 &&
+        this.draftVersion === versionAtSaveStart
+      ) {
+        const pruned = await this.options.store.save(valuesToSave, {
+          scope: "session",
+          trustedProject: finalLoaded.trustedProject,
+          expectedSnapshot: finalLoaded.snapshot,
+        });
+        finalLoaded = pruned.loaded;
+      }
+
+      this.loadedState = finalLoaded;
+      this.baselineValues = cloneValue(finalLoaded.effective);
+      if (this.draftVersion === versionAtSaveStart) {
+        this.draftValues = cloneValue(finalLoaded.effective);
+      }
+      this.conflictError = false;
+      this.statusBanner = undefined;
+      this.everSavedImmediate = true;
+
+      await this.options.onApply?.(cloneValue(finalLoaded.effective), {
+        scope: targetScope,
+        provenance: finalLoaded.provenance,
+        writtenKeys: result.writtenKeys,
+      });
+
+      this.finish({
+        saved: true,
+        values: cloneValue(finalLoaded.effective),
+        scope: targetScope,
+        dirty: false,
+        closedBy: "save",
+      });
+    } catch (error) {
+      if (error instanceof ConcurrencyConflictError) {
+        this.conflictError = true;
+        this.statusBanner = {
+          text: "Settings changed on disk. Press R or click Reload below to refresh.",
+          tone: "error",
+        };
+      } else {
+        this.statusBanner = {
+          text: error instanceof Error ? error.message : String(error),
+          tone: "error",
+        };
+      }
+      this.options.tui.requestRender();
+    } finally {
+      this.isSaving = false;
+    }
+  }
+
+  private async performRestoreDefaults(
+    targetScope: SettingsScope = this.activeScope,
+    successMessage?: string,
+  ): Promise<void> {
     if (this.isSaving || this.closed) return;
     this.isSaving = true;
     try {
       const result = await this.options.store.restoreDefaults({
-        scope: this.activeScope,
+        scope: targetScope,
         trustedProject: this.loadedState.trustedProject,
         expectedSnapshot: this.loadedState.snapshot,
       });
@@ -2435,17 +2703,18 @@ export class SettingsDialogComponent<TFields extends FieldMap>
       this.draftValues = cloneValue(result.loaded.effective);
       this.draftVersion++;
       this.pendingImmediateSave = false;
+      this.pendingPersistentSave = false;
       this.conflictError = false;
-      if (this.saveMode === "immediate") {
+      if (this.saveMode === "immediate" || this.saveMode === "session-draft") {
         this.everSavedImmediate = true;
       }
       this.statusBanner = {
-        text: `Restored ${this.activeScope} defaults.`,
+        text: successMessage ?? `Restored ${targetScope} defaults.`,
         tone: "success",
       };
 
       await this.options.onApply?.(cloneValue(result.loaded.effective), {
-        scope: this.activeScope,
+        scope: targetScope,
         provenance: result.loaded.provenance,
         writtenKeys: result.writtenKeys,
       });

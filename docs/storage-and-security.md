@@ -8,31 +8,36 @@
 
 ## 1. Layered Resolution & Override-Only Persistence
 
-Settings resolve in three layers:
+Settings resolve in up to three layers:
 
 ```text
-schema defaults  ──▶  global overrides  ──▶  project overrides (if trustedProject === true)
+schema defaults  ──▶  global overrides  ──▶  project overrides (if trustedProject === true)  ──▶  session overrides (if "session" in scopes)
 ```
 
 - **Override-only writes (`diffForScope`):**
   - Saving to **Global** writes only keys whose values differ from `schema.defaults`.
   - Saving to **Project** writes only keys whose values differ from the effective **Global** value (or from `schema.defaults` when Global does not override that key).
-  - If a user changes a Global setting, every project that hasn't explicitly overridden that key automatically inherits the new Global value.
+  - Saving to **Session** writes only keys whose values differ from the effective **Project** (or **Global** / `schema.defaults`) value.
+  - If a user changes a Global setting, every project or session that hasn't explicitly overridden that key automatically inherits the new Global value.
 - **`deleteWhenEmpty` (default `true`):**
   - When all overrides for a scope are cleared (every key matches its base layer), `createJsonFileStorageAdapter` deletes that scope's JSON file instead of leaving behind an empty `{}` file. Set `deleteWhenEmpty: false` in `SettingsStoreOptions` / `JsonFileStorageOptions` to keep `{}` on disk instead.
 - **Restore defaults:**
-  - `store.restoreDefaults({ scope, trustedProject, expectedSnapshot })` (or the built-in `Restore defaults` row in the TUI/RPC menu) deletes the active scope's layer via `adapter.deleteLayer` (or writes `{}`) after confirmation, reverting the scope to its parent layer.
+  - `store.restoreDefaults({ scope, trustedProject, expectedSnapshot })` (or the built-in `Restore defaults` / `Reset session` rows in the TUI/RPC menu) deletes the active scope's layer via `adapter.deleteLayer` (or writes `{}`) after confirmation, reverting the scope to its parent layer.
 
 ### Provenance Indicators
 
 `store.load(...)` computes per-field provenance (`FieldProvenance`):
 
-| Provenance | TUI column | RPC badge | Meaning |
-| :--- | :--- | :--- | :--- |
-| `"default"` | `   ` | `[default]` | Neither Global nor Project overrides this key. |
-| `"global"` | `●  ` | `[G]` | Overridden in Global scope only. |
-| `"project"` | `  ●` | `[P]` | Overridden in Project scope only. |
-| `"both"` | `● ●` | `[P>G]` | Overridden in both Global and Project (Project wins). |
+| Provenance | TUI column (2-scope) | TUI column (3-scope) | RPC badge | Meaning |
+| :--- | :--- | :--- | :--- | :--- |
+| `"default"` | `   ` | `     ` | `[default]` | Neither Global, Project, nor Session overrides this key. |
+| `"global"` | `●  ` | `●    ` | `[G]` | Overridden in Global scope only. |
+| `"project"` | `  ●` | `  ●  ` | `[P]` | Overridden in Project scope only. |
+| `"both"` | `● ●` | `● ●  ` | `[P>G]` | Overridden in Global and Project (Project wins). |
+| `"session"` | — | `    ●` | `[S]` | Overridden in Session scope only. |
+| `"global+session"` | — | `●   ●` | `[S>G]` | Overridden in Global and Session (Session wins). |
+| `"project+session"` | — | `  ● ●` | `[S>P]` | Overridden in Project and Session (Session wins). |
+| `"all"` | — | `● ● ●` | `[S>P>G]` | Overridden in all three scopes (Session wins). |
 
 ---
 
@@ -149,7 +154,7 @@ How `createSessionStorageAdapter` works:
 - Still enforces `findSecretKeys` (`SECRET_KEY_REJECTED`) and `expectedHash` optimistic concurrency checks (`ConcurrencyConflictError`).
 - `getPaths()` reports `{ [scope]: "session://<entryType>" }`.
 
-> **Tip:** If your schema uses `createSessionStorageAdapter`, set `scopes: ["global"]` (or match the adapter's `scope` option), because the session adapter only stores a single target scope and throws if asked to write to another scope.
+> **Tip:** If your schema uses `createSessionStorageAdapter` standalone, set `scopes: ["global"]` (or match the adapter's `scope` option), because a single session adapter only stores one target scope and throws if asked to write to another scope. For 3-layer **Global + Project + Session** setups (`scopes: ["global", "project", "session"]`), pass `session` or `sessionAdapter` directly to `createSettingsStore(...)` / `openSettingsDialog(...)` (or compose them with `createLayeredStorageAdapter({ global, project, session })`). `createSessionStorageAdapter` also accepts `matchEntry`, `deserialize`, `serialize`, and `deletedData` hooks for custom session entry envelopes.
 
 ### `createMemoryStorageAdapter` (Unit Tests)
 

@@ -7,6 +7,7 @@ import type {
   InferSettingsValues,
   ModelPickerEntry,
   PersistedFieldKeys,
+  SaveMode,
   ScopedModelEntry,
   SettingsSchema,
   SettingsScope,
@@ -26,17 +27,49 @@ interface ActiveDialogEntry<TFields extends FieldMap = FieldMap> {
 
 const activeDialogs = new Map<string, ActiveDialogEntry<any>>();
 
+function combineAbortSignals(
+  a: AbortSignal | undefined,
+  b: AbortSignal | undefined,
+): { readonly signal: AbortSignal | undefined; readonly cleanup: () => void } {
+  if (!a) return { signal: b, cleanup: () => {} };
+  if (!b) return { signal: a, cleanup: () => {} };
+  if (typeof AbortSignal.any === "function") {
+    return { signal: AbortSignal.any([a, b]), cleanup: () => {} };
+  }
+  const combined = new AbortController();
+  const onAbort = () => combined.abort();
+  if (a.aborted || b.aborted) {
+    combined.abort();
+    return { signal: combined.signal, cleanup: () => {} };
+  }
+  a.addEventListener("abort", onAbort, { once: true });
+  b.addEventListener("abort", onAbort, { once: true });
+  return {
+    signal: combined.signal,
+    cleanup: () => {
+      a.removeEventListener("abort", onAbort);
+      b.removeEventListener("abort", onAbort);
+    },
+  };
+}
+
 function resolveInitialScope<TFields extends FieldMap>(
   schema: SettingsSchema<TFields>,
   trustedProject: boolean,
+  saveMode?: SaveMode,
 ): SettingsScope {
-  if (!trustedProject && schema.defaultScope === "project" && schema.scopes.includes("global")) {
+  const effectiveSaveMode = saveMode ?? schema.saveMode;
+  const selectable =
+    effectiveSaveMode === "session-draft"
+      ? schema.scopes.filter((s) => s !== "session")
+      : schema.scopes;
+  if (!trustedProject && schema.defaultScope === "project" && selectable.includes("global")) {
     return "global";
   }
-  if (schema.scopes.includes(schema.defaultScope)) {
+  if (selectable.includes(schema.defaultScope)) {
     return schema.defaultScope;
   }
-  return schema.scopes[0] ?? "global";
+  return selectable[0] ?? "global";
 }
 
 export async function openSettingsDialog<TFields extends FieldMap>(
@@ -72,6 +105,8 @@ export async function openSettingsDialog<TFields extends FieldMap>(
     options.store ??
     createSettingsStore(schema, {
       adapter: options.adapter,
+      sessionAdapter: options.sessionAdapter,
+      session: options.session,
       agentDir: options.agentDir,
       cwd: options.cwd ?? ctx.cwd,
       settingsFile: options.settingsFile,
@@ -85,7 +120,11 @@ export async function openSettingsDialog<TFields extends FieldMap>(
     (typeof ctx.isProjectTrusted === "function" ? ctx.isProjectTrusted() : false);
 
   const loaded = await store.load({ trustedProject });
-  const initialScope = resolveInitialScope(schema, loaded.trustedProject);
+  const initialScope = resolveInitialScope(schema, loaded.trustedProject, options.saveMode);
+  const { signal: combinedSignal, cleanup: cleanupSignals } = combineAbortSignals(
+    ctx.signal,
+    options.signal,
+  );
 
   const availableModels: readonly ModelPickerEntry[] | (() => readonly ModelPickerEntry[]) =
     options.availableModels ??
@@ -93,159 +132,164 @@ export async function openSettingsDialog<TFields extends FieldMap>(
   const scopedModels: readonly ScopedModelEntry[] | (() => readonly ScopedModelEntry[]) =
     options.scopedModels ?? (() => (Array.isArray(ctx.scopedModels) ? ctx.scopedModels : []));
 
-  if (ctx.mode === "tui" && ctx.hasUI) {
-    if (ctx.signal?.aborted) {
-      return {
-        mode: "tui",
-        opened: false,
-        saved: false,
-        values: loaded.effective,
-        scope: initialScope,
-        paths: loaded.paths,
-        warnings: loaded.warnings,
-        closedBy: "abort",
+  try {
+    if (ctx.mode === "tui" && ctx.hasUI) {
+      if (combinedSignal?.aborted) {
+        return {
+          mode: "tui",
+          opened: false,
+          saved: false,
+          values: loaded.effective,
+          scope: initialScope,
+          paths: loaded.paths,
+          warnings: loaded.warnings,
+          closedBy: "abort",
+        };
+      }
+
+      const { SettingsDialogComponent } = await import("../dialog/settings-dialog.js");
+
+      if (combinedSignal?.aborted) {
+        return {
+          mode: "tui",
+          opened: false,
+          saved: false,
+          values: loaded.effective,
+          scope: initialScope,
+          paths: loaded.paths,
+          warnings: loaded.warnings,
+          closedBy: "abort",
+        };
+      }
+
+      const overlayOptions: OverlayOptions = {
+        anchor: "center",
+        width: options.preferredWidth ?? 86,
+        minWidth: 44,
+        maxHeight: "90%",
+        margin: 1,
+        ...options.overlayOptions,
       };
-    }
 
-    const { SettingsDialogComponent } = await import("../dialog/settings-dialog.js");
+      const handleRef: { current: OverlayHandle | undefined } = { current: undefined };
+      let componentRef: SettingsDialogComponent<TFields> | undefined;
+      let latestValues = loaded.effective;
+      let latestScope = initialScope;
 
-    if (ctx.signal?.aborted) {
-      return {
-        mode: "tui",
-        opened: false,
-        saved: false,
-        values: loaded.effective,
-        scope: initialScope,
-        paths: loaded.paths,
-        warnings: loaded.warnings,
-        closedBy: "abort",
+      const wrappedOnApply = async (
+        next: InferSettingsValues<TFields>,
+        meta: {
+          scope: SettingsScope;
+          provenance: Record<PersistedFieldKeys<TFields>, FieldProvenance>;
+          writtenKeys: string[];
+        },
+      ): Promise<void> => {
+        latestValues = next;
+        latestScope = meta.scope;
+        await options.onApply?.(next, meta);
       };
-    }
 
-    const overlayOptions: OverlayOptions = {
-      anchor: "center",
-      width: options.preferredWidth ?? 86,
-      minWidth: 44,
-      maxHeight: "90%",
-      margin: 1,
-      ...options.overlayOptions,
-    };
+      const onAbort = (): void => {
+        componentRef?.abort();
+      };
 
-    const handleRef: { current: OverlayHandle | undefined } = { current: undefined };
-    let componentRef: SettingsDialogComponent<TFields> | undefined;
-    let latestValues = loaded.effective;
-    let latestScope = initialScope;
+      if (combinedSignal) {
+        combinedSignal.addEventListener("abort", onAbort, { once: true });
+      }
 
-    const wrappedOnApply = async (
-      next: InferSettingsValues<TFields>,
-      meta: {
-        scope: SettingsScope;
-        provenance: Record<PersistedFieldKeys<TFields>, FieldProvenance>;
-        writtenKeys: string[];
-      },
-    ): Promise<void> => {
-      latestValues = next;
-      latestScope = meta.scope;
-      await options.onApply?.(next, meta);
-    };
-
-    const onAbort = (): void => {
-      componentRef?.abort();
-    };
-
-    if (ctx.signal) {
-      ctx.signal.addEventListener("abort", onAbort, { once: true });
-    }
-
-    try {
-      const dialogResult = await ctx.ui.custom<
-        SettingsDialogResult<InferSettingsValues<TFields>>
-      >(
-        (tui, theme, keybindings, done) => {
-          const component = new SettingsDialogComponent({
-            schema,
-            store,
-            initialState: loaded,
-            tui,
-            theme,
-            keybindings,
-            done,
-            initialTab: options.initialTab,
-            initialField: options.initialField,
-            saveMode: options.saveMode,
-            preferredWidth: options.preferredWidth,
-            maxHeight: overlayOptions.maxHeight,
-            renderPreview: options.renderPreview,
-            availableModels,
-            scopedModels,
-            onApply: wrappedOnApply,
-          });
-          componentRef = component;
-          activeDialogs.set(schema.id, {
-            component,
-            handleRef,
-            getSnapshot: () => ({
-              values: latestValues,
-              scope: latestScope,
-              paths: loaded.paths,
-            }),
-          });
-
-          if (ctx.signal?.aborted) {
-            queueMicrotask(() => {
-              component.abort();
+      try {
+        const dialogResult = await ctx.ui.custom<
+          SettingsDialogResult<InferSettingsValues<TFields>>
+        >(
+          (tui, theme, keybindings, done) => {
+            const component = new SettingsDialogComponent({
+              schema,
+              store,
+              initialState: loaded,
+              tui,
+              theme,
+              keybindings,
+              done,
+              initialTab: options.initialTab,
+              initialField: options.initialField,
+              saveMode: options.saveMode,
+              preferredWidth: options.preferredWidth,
+              maxHeight: overlayOptions.maxHeight,
+              renderPreview: options.renderPreview,
+              availableModels,
+              scopedModels,
+              onApply: wrappedOnApply,
             });
-          }
+            componentRef = component;
+            activeDialogs.set(schema.id, {
+              component,
+              handleRef,
+              getSnapshot: () => ({
+                values: latestValues,
+                scope: latestScope,
+                paths: loaded.paths,
+              }),
+            });
 
-          return component;
-        },
-        {
-          overlay: true,
-          overlayOptions,
-          onHandle: (handle) => {
-            handleRef.current = handle;
+            if (combinedSignal?.aborted) {
+              queueMicrotask(() => {
+                component.abort();
+              });
+            }
+
+            return component;
           },
-        },
-      );
+          {
+            overlay: true,
+            overlayOptions,
+            onHandle: (handle) => {
+              handleRef.current = handle;
+            },
+          },
+        );
 
-      return {
-        mode: "tui",
-        opened: true,
-        saved: dialogResult.saved,
-        values: dialogResult.values,
-        scope: dialogResult.scope,
-        paths: loaded.paths,
-        warnings: loaded.warnings,
-        closedBy: dialogResult.closedBy,
-      };
-    } finally {
-      ctx.signal?.removeEventListener("abort", onAbort);
-      if (componentRef && activeDialogs.get(schema.id)?.component === componentRef) {
-        activeDialogs.delete(schema.id);
+        return {
+          mode: "tui",
+          opened: true,
+          saved: dialogResult.saved,
+          values: dialogResult.values,
+          scope: dialogResult.scope,
+          paths: loaded.paths,
+          warnings: loaded.warnings,
+          closedBy: dialogResult.closedBy,
+        };
+      } finally {
+        combinedSignal?.removeEventListener("abort", onAbort);
+        if (componentRef && activeDialogs.get(schema.id)?.component === componentRef) {
+          activeDialogs.delete(schema.id);
+        }
       }
     }
-  }
 
-  if (ctx.mode === "rpc" && ctx.hasUI) {
-    const { runRpcSettingsMenu } = await import("./rpc-fallback.js");
-    return runRpcSettingsMenu(ctx, schema, store, loaded, {
-      saveMode: options.saveMode,
-      onApply: options.onApply,
-      initialTab: options.initialTab,
-      initialField: options.initialField,
-      availableModels,
-      scopedModels,
-    });
-  }
+    if (ctx.mode === "rpc" && ctx.hasUI) {
+      const { runRpcSettingsMenu } = await import("./rpc-fallback.js");
+      return runRpcSettingsMenu(ctx, schema, store, loaded, {
+        saveMode: options.saveMode,
+        onApply: options.onApply,
+        initialTab: options.initialTab,
+        initialField: options.initialField,
+        availableModels,
+        scopedModels,
+        signal: combinedSignal,
+      });
+    }
 
-  return {
-    mode: ctx.mode,
-    opened: false,
-    saved: false,
-    values: loaded.effective,
-    scope: initialScope,
-    paths: loaded.paths,
-    warnings: loaded.warnings,
-    closedBy: "headless",
-  };
+    return {
+      mode: ctx.mode,
+      opened: false,
+      saved: false,
+      values: loaded.effective,
+      scope: initialScope,
+      paths: loaded.paths,
+      warnings: loaded.warnings,
+      closedBy: "headless",
+    };
+  } finally {
+    cleanupSignals();
+  }
 }

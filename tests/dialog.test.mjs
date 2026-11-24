@@ -2533,3 +2533,151 @@ test("25. Arrow stepping (picker enum ignores Left/Right; exact float stepping 0
     ratio: 0.425,
   });
 });
+
+test("26. session-draft mode: 3 provenance dots, live session edits, Esc preserves session, Ctrl+S saves to Global/Project & prunes session, Reset session", async () => {
+  const entries = [];
+  const schema = defineSettings({
+    id: "session-draft-dialog",
+    title: "Session Draft Test",
+    scopes: ["global", "project", "session"],
+    defaultScope: "global",
+    saveMode: "session-draft",
+    fields: {
+      maxOpen: field.integer({
+        label: "Max open",
+        description: "Maximum running jobs",
+        default: 8,
+        min: 1,
+        max: 64,
+      }),
+      maxTotal: field.integer({
+        label: "Max total",
+        description: "Maximum retained jobs",
+        default: 16,
+        min: 1,
+        max: 64,
+      }),
+    },
+  });
+
+  const mem = createMemoryStorageAdapter({
+    global: { maxOpen: 10 },
+    project: { maxTotal: 20 },
+  });
+  const sessionAdapter = createMemoryStorageAdapter().getPaths ? undefined : undefined;
+  let sessionHash = null;
+  let sessionData = null;
+  const { createLayeredStorageAdapter, createSessionStorageAdapter } = await import("../dist/store/index.js");
+  const sessionLayerAdapter = createSessionStorageAdapter({
+    entryType: "bgmon:test",
+    scope: "session",
+    appendEntry: (type, data) => entries.push({ type: "custom", customType: type, data }),
+    getEntries: () => entries,
+  });
+  const adapter = createLayeredStorageAdapter({
+    global: mem,
+    project: mem,
+    session: sessionLayerAdapter,
+  });
+  const store = createSettingsStore(schema, { adapter });
+  const initialState = await store.load({ trustedProject: true });
+
+  const applied = [];
+  const results = [];
+  const tui = createMockTui({ rows: 24, columns: 84, mode: "fullscreen" });
+  const dialog = new SettingsDialogComponent({
+    schema,
+    store,
+    initialState,
+    tui,
+    theme: createMockTheme(),
+    keybindings: createMockKeybindings(),
+    done: (res) => results.push(res),
+    onApply: (next, meta) => applied.push({ next, meta }),
+  });
+  dialog.focused = true;
+
+  let lines = dialog.render(84).map(stripTerminalSequences);
+  assert.ok(lines.every((l) => visibleWidth(l) <= 84));
+  assert.ok(lines.length <= 20);
+  // 3-scope legend renders Global, Project, Session
+  assert.ok(lines.some((l) => l.includes("Saved:") && l.includes("Global") && l.includes("Project") && l.includes("Session")));
+  assert.ok(lines.some((l) => l.includes("Live session ·")));
+  assert.ok(lines.some((l) => l.includes("[Ctrl+S Save]") && l.includes("[Esc Close]")));
+
+  // Step maxOpen right (10 -> 11) -> immediately saves to session only, leaves global/project untouched
+  dialog.handleInput(KEY_RIGHT);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(applied.length, 1);
+  assert.equal(applied[0].meta.scope, "session");
+  assert.deepEqual(applied[0].next, { maxOpen: 11, maxTotal: 20 });
+  assert.equal(applied[0].meta.provenance.maxOpen, "global+session");
+  assert.equal((await mem.readLayer("global")).data?.maxOpen, 10);
+  assert.equal((await mem.readLayer("project")).data?.maxOpen, undefined);
+  assert.equal(entries.length, 1);
+
+  lines = dialog.render(84).map(stripTerminalSequences);
+  assert.ok(lines[1].includes("● Session") && lines[1].includes("[Global]"));
+  assert.ok(lines.some((l) => l.includes("Reset session")));
+  // 3-dot column: global+session has ●   ● before value 11
+  assert.ok(lines.some((l) => l.includes("Max open") && l.includes("●   ●") && l.includes("11")));
+  // Narrow render safety with 3 provenance dots
+  const narrow = dialog.render(46).map(stripTerminalSequences);
+  assert.ok(narrow.every((l) => visibleWidth(l) <= 46));
+
+  // Esc closes without discarding session changes
+  dialog.handleInput(KEY_ESC);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].closedBy, "escape");
+  assert.equal(results[0].saved, true);
+  assert.deepEqual(results[0].values, { maxOpen: 11, maxTotal: 20 });
+
+  // Reopen -> session value is preserved, test Reset session
+  const reloaded = await store.load({ trustedProject: true });
+  assert.deepEqual(reloaded.effective, { maxOpen: 11, maxTotal: 20 });
+
+  const results2 = [];
+  const dialog2 = new SettingsDialogComponent({
+    schema,
+    store,
+    initialState: reloaded,
+    tui,
+    theme: createMockTheme(),
+    keybindings: createMockKeybindings(),
+    done: (res) => results2.push(res),
+    onApply: (next, meta) => applied.push({ next, meta }),
+  });
+  dialog2.focused = true;
+  // Navigate to Reset session (maxOpen -> maxTotal -> Save scope -> Reset session)
+  dialog2.handleInput(KEY_DOWN);
+  dialog2.handleInput(KEY_DOWN);
+  dialog2.handleInput(KEY_DOWN);
+  dialog2.handleInput(KEY_ENTER);
+  // Confirm Reset session (default focus is Cancel -> Left to Clear, Enter)
+  dialog2.handleInput(KEY_LEFT);
+  dialog2.handleInput(KEY_ENTER);
+  await new Promise((r) => setTimeout(r, 20));
+  const afterReset = await store.load({ trustedProject: true });
+  assert.deepEqual(afterReset.effective, { maxOpen: 10, maxTotal: 20 });
+  assert.deepEqual(afterReset.layers.session, {});
+
+  // Edit maxTotal -> saves to session, then switch Save scope to Project and Ctrl+S -> writes project & clears session!
+  dialog2.navigateTo({ field: "maxTotal" });
+  dialog2.handleInput(KEY_RIGHT);
+  await new Promise((r) => setTimeout(r, 20));
+  dialog2.handleInput(KEY_DOWN); // Save scope
+  dialog2.handleInput(KEY_ENTER); // Global -> Project
+  dialog2.handleInput(KEY_CTRL_S);
+  await new Promise((r) => setTimeout(r, 25));
+
+  assert.equal(results2.length, 1);
+  assert.equal(results2[0].closedBy, "save");
+  assert.equal(results2[0].saved, true);
+  assert.equal(results2[0].scope, "project");
+  assert.deepEqual(results2[0].values, { maxOpen: 10, maxTotal: 21 });
+
+  const finalLoaded = await store.load({ trustedProject: true });
+  assert.equal(finalLoaded.layers.project.maxTotal, 21);
+  assert.deepEqual(finalLoaded.layers.session, {});
+  assert.equal(finalLoaded.provenance.maxTotal, "project");
+});
