@@ -13,7 +13,13 @@ export async function runRpcSettingsMenu<TFields extends FieldMap>(
   loaded: LoadedSettings<InferSettingsValues<TFields>>,
   options?: Pick<
     OpenSettingsDialogOptions<TFields>,
-    "saveMode" | "onApply" | "initialTab" | "initialField" | "availableModels" | "scopedModels"
+    | "saveMode"
+    | "onApply"
+    | "initialTab"
+    | "initialField"
+    | "availableModels"
+    | "scopedModels"
+    | "signal"
   >,
 ): Promise<OpenSettingsDialogResult<InferSettingsValues<TFields>>> {
   const { runRpcSettingsMenu: run } = await import("./rpc-fallback.js");

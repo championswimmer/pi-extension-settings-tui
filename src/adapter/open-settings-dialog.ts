@@ -1,4 +1,9 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+// Keep a runtime @earendil-works/pi-tui import so Pi's jiti loader applies its
+// @earendil-works/pi-tui alias instead of falling back to native Node ESM,
+// which would fail on the lazy import("../dialog/settings-dialog.js") below
+// when installed without a local peer copy of @earendil-works/pi-tui.
+import "@earendil-works/pi-tui";
 import type { OverlayHandle, OverlayOptions } from "@earendil-works/pi-tui";
 import type { SettingsDialogComponent, SettingsDialogResult } from "../dialog/index.js";
 import type {

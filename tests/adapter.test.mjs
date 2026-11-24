@@ -1542,3 +1542,94 @@ test("openSettingsDialog supports session option, external signal abort, and RPC
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test("Pi loadExtensions resolves @earendil-works/pi-tui inside nested node_modules install when opening TUI dialog", async () => {
+  const { loadExtensions } = await import(
+    "../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js"
+  );
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-settings-jiti-nested-"));
+  try {
+    const extRoot = path.join(tmp, "node_modules", "test-ext");
+    const extDist = path.join(extRoot, "dist");
+    const nestedLib = path.join(extRoot, "node_modules", "pi-extension-settings-tui");
+    fs.mkdirSync(extDist, { recursive: true });
+    fs.mkdirSync(nestedLib, { recursive: true });
+
+    fs.copyFileSync(
+      path.resolve("package.json"),
+      path.join(nestedLib, "package.json"),
+    );
+    fs.cpSync(path.resolve("dist"), path.join(nestedLib, "dist"), { recursive: true });
+
+    fs.writeFileSync(
+      path.join(extRoot, "package.json"),
+      JSON.stringify({ name: "test-ext", type: "module" }),
+    );
+    fs.writeFileSync(
+      path.join(extDist, "index.js"),
+      `
+import { Type } from "typebox";
+import { defineSettings, field } from "pi-extension-settings-tui/schema";
+void Type;
+const schema = defineSettings({
+  id: "jiti-nested-test",
+  title: "Jiti Nested Test",
+  scopes: ["global"],
+  fields: {
+    enabled: field.boolean({ label: "Enabled", default: true }),
+  },
+});
+export default function (pi) {
+  pi.registerCommand("nested-settings", {
+    description: "Open nested settings",
+    handler: async (_args, ctx) => {
+      const { openSettingsDialog } = await import("pi-extension-settings-tui/adapter");
+      return openSettingsDialog(ctx, { schema, agentDir: ${JSON.stringify(path.join(tmp, "agent"))} });
+    },
+  });
+}
+`,
+    );
+
+    const loaded = await loadExtensions([path.join(extDist, "index.js")], tmp);
+    assert.deepEqual(loaded.errors, []);
+    const command = loaded.extensions[0]?.commands.get("nested-settings");
+    assert.ok(command, "Command should be registered");
+
+    let rendered = [];
+    const { ctx } = createBaseContext({
+      mode: "tui",
+      hasUI: true,
+      cwd: tmp,
+      ui: {
+        theme: createMockTheme(),
+        notify: () => {},
+        select: async () => undefined,
+        confirm: async () => false,
+        input: async () => undefined,
+        editor: async () => undefined,
+        custom: async (factory) => {
+          let result;
+          const comp = factory(
+            createMockTui(),
+            createMockTheme(),
+            createMockKeybindings(),
+            (r) => {
+              result = r;
+            },
+          );
+          rendered = comp.render(80);
+          comp.handleInput("\x1b");
+          return result;
+        },
+      },
+    });
+
+    const dialogResult = await command.handler("", ctx);
+    assert.equal(dialogResult.opened, true);
+    assert.equal(dialogResult.closedBy, "escape");
+    assert.ok(rendered.some((line) => line.includes("Jiti Nested Test")));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
